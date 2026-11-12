@@ -3,4 +3,5 @@ node_modules
 dist
 .idea
 src/app/languages
-src/app/iconsdist-2draw
+src/app/icons
+dist-2draw
