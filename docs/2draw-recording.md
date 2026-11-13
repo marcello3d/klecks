@@ -1,7 +1,18 @@
 # Timelapse recording in Klecks (2draw fork)
 
-Design doc, 2026-11-13. Nothing here is implemented. It replaces the earlier input-replay design
-(see "Alternatives considered"). Code references are to the `2draw` branch at fc40750
+Design doc, 2026-11-13. It replaces the earlier input-replay design (see "Alternatives
+considered"). Implemented on the `recording` branch (phase 1): `embed/embed-recording.ts`,
+`embed/recording-format.ts`, `embed/embed-input.ts`, the draft's video pieces in
+`embed/embed-draft.ts`. Where it differs from the text below:
+
+- The embed has no crop, resize or rotate (those filters are `inEmbed: false`), so a canvas size
+  change can't happen there. The recorder still handles one (a new clip); a second clip comes
+  from a draft continued in another browser, which the tests cover (Chrome to WebKit).
+- A resumed draft adds no keyframe at load: the recording already ends on that picture. The new
+  encoder's keyframe is the first change after the reload, so reloads cost nothing.
+- The owner's answers to section 11: private drawings upload their timelapse like the picture;
+  recording is always on, with no opt-out; pacing stays at 30 steps a second; the cap stays at
+  16 MiB per version and recordings are kept until the drawing is deleted. Code references are to the `2draw` branch at fc40750
 (`src/app/script/...`, written below without that prefix) and to 2draw.net's `origin/beta`.
 
 ## Summary

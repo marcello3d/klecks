@@ -1,5 +1,6 @@
 <!DOCTYPE html>
-<!-- mocked drawing page that keeps a draft: draw, reload, and the drawing is still there -->
+<!-- mocked drawing page that keeps a draft: draw, reload, and the drawing is still there.
+     It records a timelapse too: "Play recording" shows it, and logs what the recorder did. -->
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -8,6 +9,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 </head>
 <body>
+<button id="play-recording" style="position: fixed; left: 8px; bottom: 8px; z-index: 1000">Play recording</button>
 
 <script src="../../dist/embed.js"></script>
 <script type="text/javascript">
@@ -32,6 +34,7 @@
         let saved = (await idb('readonly', (store) => store.get('draft'))) ?? null;
         const flushes = [];
         const klecks = new Klecks({
+            recording: true,
             onSubmit: async (onSuccess) => {
                 await idb('readwrite', (store) => store.delete('draft'));
                 onSuccess();
@@ -56,6 +59,34 @@
             height: 500,
             layers: [{ name: 'Background', opacity: 1, image: { fill: '#fff' } }],
         });
+        // the recording: one <video> per clip, played in order
+        document.getElementById('play-recording').onclick = async () => {
+            console.log('recording', klecks.getRecordingInfo());
+            const clips = await klecks.getRecording();
+            if (!clips.length) {
+                alert('No recording (this browser has no H.264 VideoEncoder?)');
+                return;
+            }
+            const box = document.createElement('div');
+            box.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,.8);display:flex;align-items:center;justify-content:center';
+            const video = document.createElement('video');
+            video.muted = true;
+            video.playsInline = true;
+            video.controls = true;
+            video.style.cssText = 'max-width:90vw;max-height:90vh;background:#fff';
+            let i = 0;
+            const next = () => {
+                if (i < clips.length) {
+                    video.src = URL.createObjectURL(clips[i++]);
+                    video.play();
+                }
+            };
+            video.onended = next;
+            box.onclick = (e) => e.target === box && box.remove();
+            box.append(video);
+            document.body.append(box);
+            next();
+        };
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'hidden') {
                 flushes.forEach((flush) => flush());
