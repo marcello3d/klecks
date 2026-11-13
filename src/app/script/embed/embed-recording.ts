@@ -41,6 +41,9 @@ const QUIET_MS = 120;
 const FLUSH_TIMEOUT_MS = 3000; // a stuck encoder doesn't hold up a draft save or a submit
 const MAX_QUEUE = 2; // frames waiting in the encoder before grabs are skipped (and coalesce)
 const FRAME_US = Math.round(1e6 / RECORDING_FPS);
+// A frame's bytes at most: one draft piece (PIECE_MAX, 1 MiB) with its record header. Keyframes
+// are 150 to 270 kB at the defaults.
+const CHUNK_MAX = 1024 * 1024 - 64;
 
 export type TRecordingClip = {
     codec: string;
@@ -635,6 +638,9 @@ export class EmbedRecording {
         key: boolean,
         description?: Uint8Array,
     ): void {
+        if (this.sealed) {
+            return;
+        }
         const session = this.session && this.session.id === sessionId ? this.session : null;
         let clip: TRecordingClip | null;
         if (session) {
@@ -678,10 +684,17 @@ export class EmbedRecording {
         if (clip.chunks.length === 0 && !key) {
             return;
         }
+        if (bytes.length > CHUNK_MAX) {
+            // its draft piece would pass the store's part limit: the clip ends before it
+            this.stop('a frame of ' + bytes.length + ' bytes');
+            this.sealed = true;
+            return;
+        }
         clip.chunks.push({ bytes, key });
         this.totalBytes += bytes.length;
     }
     private readonly sessionClips = new Map<number, TRecordingClip>();
+    private sealed = false; // no more chunks, not even those the encoder still holds
 
     private onEncoderError(sessionId: number, message: string): void {
         console.warn('Recording encoder error:', message);
