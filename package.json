@@ -11,7 +11,8 @@
     "lang:add": "node src/languages/generate.js add",
     "lang:sync": "node src/languages/generate.js sync",
     "lang:build": "node src/languages/generate.js build",
-    "icon:build": "node src/icons/generate.js"
+    "icon:build": "node src/icons/generate.js",
+    "test": "node --test scripts/test-recording-unit.mjs && node scripts/test-recording.mjs"
   },
   "dependencies": {
     "@parcel/service-worker": "2.16.4",
@@ -21,11 +22,13 @@
     "buffer": "6.0.3",
     "js-beautify": "^1.14.9",
     "json5": "2.2.3",
+    "mp4-muxer": "5.2.2",
     "parcel": "2.16.4",
     "polygon-clipping": "0.15.7",
     "transformation-matrix": "3.1.0"
   },
   "devDependencies": {
-    "csstype": "^3.2.3"
+    "csstype": "^3.2.3",
+    "playwright-core": "1.64.1"
   }
 }
