@@ -25,6 +25,12 @@ a blank canvas or the drawing to continue (`psdUrl`), and on submit the PNG and 
 - The embed's opt-in `draft` option: autosave through the embedder's storage, saved incrementally as Klecks's 256 px
   history tiles (format `klecks-tiles-1`). `Klecks.features.draft` says it is there. See
   `examples/embed/example-draft.html`. Proposed upstream as bitbof/klecks#260.
+- The embed's opt-in `recording` option: a timelapse, one H.264 frame per history step, taken only when the artist
+  rests, encoded in a worker, kept in the draft and muxed into MP4s (`mp4-muxer`) at submit by `getRecording()`.
+  `Klecks.features.recording` says it is there; `getRecordingInfo()` tells what the recorder did. Browsers without an
+  H.264 `VideoEncoder` don't record. See `docs/2draw-recording.md` and the "Play recording" button in
+  `examples/embed/example-draft.html`. Tests: `node --test scripts/test-recording-unit.mjs` and
+  `node scripts/test-recording.mjs` (Chrome and WebKit through Playwright).
 - `scripts/build-2draw.mjs` and this file.
 
 To take upstream changes, merge bitbof/klecks `main` into this branch.

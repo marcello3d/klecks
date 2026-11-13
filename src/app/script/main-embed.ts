@@ -9,6 +9,7 @@ import { asyncThrow, randomUuid } from './bb/base/base';
 import { initIconCss } from './icon/icon';
 import { getMixModeStr } from './klecks/canvas/get-mix-mode';
 import { EmbedDraft, restoreDraft, TDraftRestored, TEmbedDraft } from './embed/embed-draft';
+import { EmbedRecording, TRecordingInfo } from './embed/embed-recording';
 
 initIconCss();
 
@@ -24,6 +25,9 @@ export type TEmbedParams = {
     // Opt-in autosave through the embedder's storage. A draft.saved is opened instead of
     // project/openProject(), which are only used if it can't be read.
     draft?: TEmbedDraft;
+    // Opt-in timelapse: an H.264 frame per history step, in the draft if there is one.
+    // getRecording() gives the MP4s. Browsers without an H.264 VideoEncoder don't record.
+    recording?: boolean;
 };
 
 export type TReadPSD = {
@@ -58,6 +62,7 @@ export class Embed {
     private isRestoringDraft: boolean = false;
     private fallbackProject: TKlEmbedProject | undefined; // if draft.saved can't be read
     private restoredDraft: TDraftRestored | undefined;
+    private recording: EmbedRecording | undefined;
 
     onProjectReady(embedProject: TKlEmbedProject) {
         if (this.isRestoringDraft) {
@@ -85,11 +90,25 @@ export class Embed {
                     onSubmit: this.p.onSubmit,
                 },
             });
+            const restoredVideo = this.restoredDraft?.video;
+            if (this.p.recording || restoredVideo?.clips.length) {
+                // Without the option (or an encoder) a draft's recording is only carried along.
+                try {
+                    this.recording = new EmbedRecording({
+                        klApp: this.klApp,
+                        canEncode: !!this.p.recording,
+                        restored: restoredVideo,
+                    });
+                } catch (e) {
+                    console.error('Recording unavailable', e);
+                }
+            }
             if (this.p.draft) {
                 new EmbedDraft({
                     klApp: this.klApp,
                     store: this.p.draft.store,
                     restored: this.restoredDraft,
+                    recording: this.recording,
                 });
             }
 
@@ -164,6 +183,20 @@ export class Embed {
             throw new Error('App not initialized');
         }
         return await this.klApp.getPSD();
+    }
+
+    // One video/mp4 per clip, in order; empty without a recording. Never throws.
+    async getRecording(): Promise<Blob[]> {
+        try {
+            return this.recording ? await this.recording.getClips() : [];
+        } catch (e) {
+            console.error('Recording unavailable', e);
+            return [];
+        }
+    }
+
+    getRecordingInfo(): TRecordingInfo | null {
+        return this.recording ? this.recording.getInfo() : null;
     }
 
     readPSDs(psds: TReadPSD[]) {

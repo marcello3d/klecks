@@ -17,7 +17,8 @@ let wrapperCreated = false;
  * Lazy loads rest of library, shows a loading screen, exposes Embed interface
  */
 export class EmbedWrapper {
-    static readonly features = { draft: 1 }; // the `draft` option
+    // the `draft` option; the `recording` option and getRecording()
+    static readonly features = { draft: 1, recording: 1 };
 
     private project: TKlEmbedProject | undefined;
     private errorStr: string | undefined;
@@ -166,5 +167,16 @@ export class EmbedWrapper {
             throw new Error('Embed not initialized');
         }
         return await this.embed.getPSD();
+    };
+
+    // The timelapse (the `recording` option), one video/mp4 Blob per clip, in order. Empty
+    // when there is none. It ends on the current picture.
+    getRecording = async (): Promise<Blob[]> => {
+        return this.embed ? await this.embed.getRecording() : [];
+    };
+
+    // What the recorder is doing (state, codec, frames, bytes, grab times), or null.
+    getRecordingInfo = () => {
+        return this.embed ? this.embed.getRecordingInfo() : null;
     };
 }

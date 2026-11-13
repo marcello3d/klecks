@@ -11,6 +11,18 @@ import { drawProject } from '../klecks/canvas/draw-project';
 import { canvasToBlob } from '../bb/base/canvas';
 import { randomUuid } from '../bb/base/base';
 import { BB } from '../bb/bb';
+import { EmbedInput, getEmbedInput } from './embed-input';
+import type { EmbedRecording, TRecordingClip, TRecordingRestored } from './embed-recording';
+import {
+    base64ToBytes,
+    bytesToBase64,
+    checkVideoTail,
+    chunksToPieces,
+    RECORDING_FPS,
+    TVideoChunk,
+    TVideoTail,
+    unpackChunks,
+} from './recording-format';
 
 /**
  * Drafts (opt-in): Klecks saves the drawing in progress through the embedder's store, so a reload
@@ -21,6 +33,9 @@ import { BB } from '../bb/bb';
  * - pieces: append-only. One or more tiles each, back to back: RGBA as in the tile's ImageData,
  *   deflated ('deflate-raw').
  * - tail: JSON (TTail). Per tile a fill color, or where it is: TTileRef.
+ * - With a recording (embed-recording.ts), video pieces too: the encoded frames, runs of
+ *   u32 length, u8 flags (bit 0: keyframe), bytes (recording-format.ts). TTail.video lists
+ *   them per clip; a reader that doesn't know it ignores it.
  *
  * A save appends the tiles that weren't saved yet and replaces the tail. When most saved tiles
  * aren't used anymore, the next save starts over (fresh) with the live ones.
@@ -82,12 +97,14 @@ type TTail = {
         clip: boolean;
         tiles: (TTileRef | string)[];
     }[];
+    video?: TVideoTail;
 };
 
 export type TDraftRestored = {
     project: TKlProject;
     refs: Map<string, TTileRef>;
     pieceSizes: number[];
+    video?: TRecordingRestored;
 };
 
 // Deflates or inflates. Self-contained, as it also runs in the worker.
@@ -228,7 +245,39 @@ export async function restoreDraft(saved: TEmbedDraftSaved): Promise<TDraftResto
         },
         imageDataById,
     });
-    return { project, refs, pieceSizes: saved.pieces.map((piece) => piece.length) };
+    return {
+        project,
+        refs,
+        pieceSizes: saved.pieces.map((piece) => piece.length),
+        video: tail.video ? restoreVideo(tail.video, saved.pieces) : undefined,
+    };
+}
+
+// The recording in a draft. One that can't be read is dropped: the drawing opens without it.
+function restoreVideo(video: unknown, pieces: Uint8Array[]): TRecordingRestored | undefined {
+    try {
+        const tail = checkVideoTail(video, pieces.length);
+        const clips: TRecordingClip[] = tail.clips.map((c) => {
+            const chunks: TVideoChunk[] = [];
+            c.pieces.forEach((i) => chunks.push(...unpackChunks(pieces[i])));
+            if (chunks.length !== c.frames || (chunks.length && !chunks[0].key)) {
+                throw new Error('Recording clip incomplete');
+            }
+            return {
+                codec: c.codec,
+                description: base64ToBytes(c.description),
+                width: c.width,
+                height: c.height,
+                chunks,
+                savedChunks: chunks.length,
+                pieces: c.pieces.slice(),
+            };
+        });
+        return { clips: clips.filter((c) => c.chunks.length > 0) };
+    } catch (e) {
+        console.error('Draft recording unreadable, dropped', e);
+        return undefined;
+    }
 }
 
 const ABORTED = new Error('aborted');
@@ -237,6 +286,7 @@ export type TEmbedDraftParams = {
     klApp: KlApp;
     store: TEmbedDraftStore;
     restored?: TDraftRestored;
+    recording?: EmbedRecording; // saved with the tiles
 };
 
 /**
@@ -247,6 +297,8 @@ export type TEmbedDraftParams = {
 export class EmbedDraft {
     private readonly klApp: KlApp;
     private readonly store: TEmbedDraftStore;
+    private readonly input: EmbedInput;
+    private readonly recording: EmbedRecording | undefined;
     private pictureKey: unknown[];
     private changeSeq: number = 0;
     private savedSeq: number = 0;
@@ -254,7 +306,6 @@ export class EmbedDraft {
     private saving: Promise<void> | undefined;
     private timeout: ReturnType<typeof setTimeout> | undefined;
     private isUrgent: boolean = false; // flushing: no waiting
-    private lastInputMs: number = 0;
     private lastThumbMs: number = -Infinity;
 
     // what the store holds
@@ -264,15 +315,8 @@ export class EmbedDraft {
     private compactWanted: boolean = false;
     private readonly encoded = new Map<string, { bytes: Uint8Array; enc: number }>();
 
-    private readonly onInput = (e: Event): void => {
-        // a hovering pen or mouse doesn't count
-        if (e.type !== 'pointermove' || (e as PointerEvent).buttons) {
-            this.lastInputMs = performance.now();
-        }
-    };
-
     private isBusy(): boolean {
-        return this.klApp.isDrawing() || performance.now() - this.lastInputMs < QUIET_MS;
+        return this.klApp.isDrawing() || this.input.waitMs(QUIET_MS) > 0;
     }
 
     private onHistoryChange(): void {
@@ -299,9 +343,7 @@ export class EmbedDraft {
         ) {
             return;
         }
-        const waitMs = this.klApp.isDrawing()
-            ? QUIET_MS
-            : this.lastInputMs + QUIET_MS - performance.now();
+        const waitMs = this.klApp.isDrawing() ? QUIET_MS : this.input.waitMs(QUIET_MS);
         this.timeout = setTimeout(
             () => {
                 this.timeout = undefined;
@@ -419,6 +461,33 @@ export class EmbedDraft {
             }
             closePiece();
 
+            // the recording: its new frames (all of them when fresh), in pieces of their own
+            let video: TVideoTail | undefined;
+            const videoCommit: { clip: TRecordingClip; to: number; pieces: number[] }[] = [];
+            if (this.recording) {
+                const parts = await this.recording.prepareSave(this.isUrgent, fresh);
+                if (parts.length) {
+                    video = { v: 1, clips: [] };
+                    for (const { clip, from, to } of parts) {
+                        const indices = fresh ? [] : clip.pieces.slice();
+                        for (const piece of chunksToPieces(clip.chunks.slice(from, to), PIECE_MAX)) {
+                            indices.push(firstPiece + append.length);
+                            append.push(piece);
+                        }
+                        videoCommit.push({ clip, to, pieces: indices });
+                        video.clips.push({
+                            codec: clip.codec,
+                            description: bytesToBase64(clip.description),
+                            width: clip.width,
+                            height: clip.height,
+                            fps: RECORDING_FPS,
+                            frames: to,
+                            pieces: indices,
+                        });
+                    }
+                }
+            }
+
             const tail: TTail = {
                 format: TILES_FORMAT,
                 v: 1,
@@ -437,6 +506,7 @@ export class EmbedDraft {
                             : (newRefs.get(tile.id) ?? known.get(tile.id)!),
                     ),
                 })),
+                ...(video ? { video } : {}),
             };
             const withThumb =
                 this.isUrgent || performance.now() - this.lastThumbMs > THUMB_EVERY_MS;
@@ -462,6 +532,7 @@ export class EmbedDraft {
                 this.encoded.delete(id);
             });
             this.pieceSizes.push(...append.map((piece) => piece.length));
+            this.recording?.committed(videoCommit);
             this.hasCopy = true;
             this.savedSeq = seq;
             this.compactWanted = this.shouldCompact(layers);
@@ -485,6 +556,10 @@ export class EmbedDraft {
         }
         let liveBytes = 0;
         live.forEach((ref) => (liveBytes += ref[2]));
+        // the recording's pieces are all live
+        this.recording?.clips.forEach((clip) =>
+            clip.pieces.forEach((i) => (liveBytes += this.pieceSizes[i] ?? 0)),
+        );
         const savedBytes = this.pieceSizes.reduce((a, b) => a + b, 0);
         return (
             savedBytes > 2 * liveBytes + COMPACT_MIN_BYTES ||
@@ -496,6 +571,8 @@ export class EmbedDraft {
     constructor(p: TEmbedDraftParams) {
         this.klApp = p.klApp;
         this.store = p.store;
+        this.input = getEmbedInput();
+        this.recording = p.recording;
         const composed = this.klApp.getKlHistory().getComposed();
         this.pictureKey = getPictureKey(composed);
         if (p.restored) {
@@ -504,9 +581,6 @@ export class EmbedDraft {
             this.pieceSizes = p.restored.pieceSizes;
             this.compactWanted = this.shouldCompact(getLayers(composed));
         }
-        ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'keydown'].forEach((type) => {
-            window.addEventListener(type, this.onInput, { capture: true, passive: true });
-        });
         this.klApp.getKlHistory().addListener(() => this.onHistoryChange());
         this.store.onFlush(() => this.flush());
     }
