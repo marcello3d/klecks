@@ -1,0 +1,44 @@
+=== penBrush
+chrome-gpu: live vs same-page replay [243 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 02c8c3e8 | L2 SAME dc86487b | first diff cp none
+chrome-gpu live vs chrome-sw replay of chrome-gpu log [295 strokes/s]
+  L0 SAME cff66cc5 | L1 02c8c3e8≠2925c360 max Δ255 65822px (6.095%, alpha-only 227) | L2 dc86487b≠90a391e7 max Δ170 2574px (0.238%, alpha-only 45) | first diff cp 5 strokes
+chrome-gpu live vs webkit replay of chrome-gpu log [250 strokes/s]
+  L0 SAME cff66cc5 | L1 02c8c3e8≠b500b1ad max Δ255 124000px (11.481%, alpha-only 559) | L2 dc86487b≠9b64e161 max Δ255 25942px (2.402%, alpha-only 2635) | first diff cp 5 strokes
+=== blendBrush
+chrome-gpu: live vs same-page replay [253 strokes/s]
+  L0 SAME cff66cc5 | L1 a6076e5e≠4b3dfa5a max Δ255 4244px (0.393%, alpha-only 14) | L2 SAME 73cc5f66 | first diff cp 50 strokes
+chrome-gpu live vs chrome-sw replay of chrome-gpu log [246 strokes/s]
+  L0 SAME cff66cc5 | L1 a6076e5e≠4b3dfa5a max Δ255 4244px (0.393%, alpha-only 14) | L2 SAME 73cc5f66 | first diff cp 30 strokes
+chrome-gpu live vs webkit replay of chrome-gpu log [198 strokes/s]
+  L0 SAME cff66cc5 | L1 a6076e5e≠5984f5e1 max Δ255 8290px (0.768%, alpha-only 14) | L2 73cc5f66≠e9e186fa max Δ1 3396px (0.314%, alpha-only 0) | first diff cp 5 strokes
+=== sketchyBrush
+chrome-gpu: live vs same-page replay [302 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME cfb8ecc2 | L2 SAME 8db4ce1b | first diff cp none
+chrome-gpu live vs chrome-sw replay of chrome-gpu log [299 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME cfb8ecc2 | L2 8db4ce1b≠23b4f48d max Δ102 47px (0.004%, alpha-only 0) | first diff cp 30 strokes
+chrome-gpu live vs webkit replay of chrome-gpu log [110 strokes/s]
+  L0 SAME cff66cc5 | L1 cfb8ecc2≠3ac608ce max Δ255 186081px (17.23%, alpha-only 637) | L2 8db4ce1b≠885d69c0 max Δ255 29637px (2.744%, alpha-only 1334) | first diff cp 5 strokes
+=== pixelBrush
+chrome-gpu: live vs same-page replay [155 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 8ccb67d9 | L2 SAME 9585a2c4 | first diff cp none
+chrome-gpu live vs chrome-sw replay of chrome-gpu log [188 strokes/s]
+  L0 SAME cff66cc5 | L1 8ccb67d9≠181d4297 max Δ4 40155px (3.718%, alpha-only 0) | L2 9585a2c4≠18ffe3fe max Δ1 34115px (3.159%, alpha-only 0) | first diff cp 5 strokes
+chrome-gpu live vs webkit replay of chrome-gpu log [155 strokes/s]
+  L0 SAME cff66cc5 | L1 8ccb67d9≠4799b38b max Δ3 39876px (3.692%, alpha-only 0) | L2 SAME 9585a2c4 | first diff cp 15 strokes
+=== chemyBrush
+chrome-gpu: live vs same-page replay [152 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 115635d2 | L2 SAME af7c734d | first diff cp none
+chrome-gpu live vs chrome-sw replay of chrome-gpu log [225 strokes/s]
+  L0 SAME cff66cc5 | L1 115635d2≠22e6be41 max Δ255 23433px (2.17%, alpha-only 582) | L2 af7c734d≠c8bc6d8a max Δ255 56377px (5.22%, alpha-only 327) | first diff cp 5 strokes
+chrome-gpu live vs webkit replay of chrome-gpu log [202 strokes/s]
+  L0 SAME cff66cc5 | L1 115635d2≠63c3c003 max Δ255 21656px (2.005%, alpha-only 640) | L2 af7c734d≠03039b1a max Δ255 61545px (5.699%, alpha-only 415) | first diff cp 5 strokes
+=== smudgeBrush
+chrome-gpu: live vs same-page replay [111 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 83c759c5 | L2 SAME 83c759c5 | first diff cp none
+chrome-gpu live vs chrome-sw replay of chrome-gpu log [133 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 83c759c5 | L2 SAME 83c759c5 | first diff cp none
+chrome-gpu live vs webkit replay of chrome-gpu log [125 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 83c759c5 | L2 SAME 83c759c5 | first diff cp none
+
+[exited with code 0]

@@ -1,0 +1,14 @@
+chrome-gpu: ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)
+  Math.random calls outside chain-out while recording: 0
+  recorded 5 strokes (5 downs at chain-out), 207 log entries, 22 kB JSON, 1.1 s
+chrome-gpu: live vs same-page replay [20 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 62348a7a | first diff cp none | cps ===== | fills 1080000/1080000px mask Δ0, 1080000/1080000px mask Δ0
+chrome-gpu: live vs same-page replay #2 [23 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 62348a7a | first diff cp none | cps ===== | fills 1080000/1080000px mask Δ0, 1080000/1080000px mask Δ0
+chrome-gpu: live vs fresh-page replay [20 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 62348a7a | first diff cp none | cps ===== | fills 1080000/1080000px mask Δ0, 1080000/1080000px mask Δ0
+chrome-gpu live vs chrome-sw replay of chrome-gpu log [18 strokes/s]
+  L0 SAME cff66cc5 | L1 62348a7a≠161eb2e6 max Δ255 45104px (4.176%, alpha-only 541) | first diff cp 125 strokes | cps ====x | fills 1080000/1080000px mask Δ0, 1080000/1080000px mask Δ0
+chrome-gpu live vs webkit replay of chrome-gpu log [21 strokes/s]
+  L0 SAME cff66cc5 | L1 62348a7a≠524f724a max Δ255 30947px (2.865%, alpha-only 536) | first diff cp 75 strokes | cps ==xxx | fills 1080000/1080000px mask Δ0, 1080000/1080000px mask Δ0
+{"chrome-gpu":{"outsideRandom":0,"ms":1084,"strokes":5,"chainStrokes":5,"events":207,"jsonBytes":22380}}

@@ -1,0 +1,216 @@
+{
+ "size": "1200x900",
+ "extras": false,
+ "env": {
+  "chrome-gpu": {
+   "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
+   "webgl": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)"
+  }
+ },
+ "record": {
+  "chrome-gpu": {
+   "ms": 7734,
+   "strokes": 50,
+   "chainStrokes": 50,
+   "events": 1116,
+   "jsonBytes": 152090
+  }
+ },
+ "pairs": [
+  {
+   "name": "chrome-gpu: live vs same-page replay",
+   "strokesPerSec": 111,
+   "layers": [
+    {
+     "i": 0,
+     "hashA": "cff66cc5",
+     "hashB": "cff66cc5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 1,
+     "hashA": "83c759c5",
+     "hashB": "83c759c5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 2,
+     "hashA": "83c759c5",
+     "hashB": "83c759c5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    }
+   ],
+   "firstDifferingCheckpoint": -1,
+   "checkpoints": 10,
+   "fills": []
+  },
+  {
+   "name": "chrome-gpu: live vs same-page replay #2",
+   "strokesPerSec": 114,
+   "layers": [
+    {
+     "i": 0,
+     "hashA": "cff66cc5",
+     "hashB": "cff66cc5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 1,
+     "hashA": "83c759c5",
+     "hashB": "83c759c5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 2,
+     "hashA": "83c759c5",
+     "hashB": "83c759c5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    }
+   ],
+   "firstDifferingCheckpoint": -1,
+   "checkpoints": 10,
+   "fills": []
+  },
+  {
+   "name": "chrome-gpu: live vs fresh-page replay",
+   "strokesPerSec": 105,
+   "layers": [
+    {
+     "i": 0,
+     "hashA": "cff66cc5",
+     "hashB": "cff66cc5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 1,
+     "hashA": "83c759c5",
+     "hashB": "83c759c5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 2,
+     "hashA": "83c759c5",
+     "hashB": "83c759c5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    }
+   ],
+   "firstDifferingCheckpoint": -1,
+   "checkpoints": 10,
+   "fills": []
+  },
+  {
+   "name": "chrome-gpu live vs chrome-sw replay of chrome-gpu log",
+   "strokesPerSec": 133,
+   "layers": [
+    {
+     "i": 0,
+     "hashA": "cff66cc5",
+     "hashB": "cff66cc5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 1,
+     "hashA": "83c759c5",
+     "hashB": "83c759c5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 2,
+     "hashA": "83c759c5",
+     "hashB": "83c759c5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    }
+   ],
+   "firstDifferingCheckpoint": -1,
+   "checkpoints": 10,
+   "fills": []
+  },
+  {
+   "name": "chrome-gpu live vs webkit replay of chrome-gpu log",
+   "strokesPerSec": 125,
+   "layers": [
+    {
+     "i": 0,
+     "hashA": "cff66cc5",
+     "hashB": "cff66cc5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 1,
+     "hashA": "83c759c5",
+     "hashB": "83c759c5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 2,
+     "hashA": "83c759c5",
+     "hashB": "83c759c5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    }
+   ],
+   "firstDifferingCheckpoint": -1,
+   "checkpoints": 10,
+   "fills": []
+  }
+ ]
+}

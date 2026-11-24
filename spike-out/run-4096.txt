@@ -1,0 +1,9 @@
+chrome-gpu: ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)
+  Math.random calls outside chain-out while recording: 0
+  recorded 140 strokes (140 downs at chain-out), 4422 log entries, 459 kB JSON, 22.6 s
+chrome-gpu: live vs same-page replay [45 strokes/s]
+  L0 SAME 351c9dc5 | L1 SAME 9cda1da8 | L2 SAME 65195187 | first diff cp none | cps 
+chrome-gpu: live vs same-page replay #2 [46 strokes/s]
+  L0 SAME 351c9dc5 | L1 SAME 9cda1da8 | L2 SAME 65195187 | first diff cp none | cps 
+chrome-gpu: live vs fresh-page replay [54 strokes/s]
+  L0 SAME 351c9dc5 | L1 SAME 9cda1da8 | L2 SAME 65195187 | first diff cp none | cps 

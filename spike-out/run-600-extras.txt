@@ -1,0 +1,34 @@
+chrome-gpu: ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)
+  Math.random calls outside chain-out while recording: 0
+  recorded 605 strokes (625 downs at chain-out), 19350 log entries, 1978 kB JSON, 90.8 s
+chrome-gpu: live vs same-page replay [270 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 9fba87f9 | L2 SAME 26db3632 | first diff cp none | fills 2963/2963px mask Δ0, 1/1px mask Δ0
+chrome-gpu: live vs same-page replay #2 [291 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 9fba87f9 | L2 SAME 26db3632 | first diff cp none | fills 2963/2963px mask Δ0, 1/1px mask Δ0
+chrome-gpu: live vs fresh-page replay [268 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 9fba87f9 | L2 SAME 26db3632 | first diff cp none | fills 2963/2963px mask Δ0, 1/1px mask Δ0
+chrome-sw: ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)
+  Math.random calls outside chain-out while recording: 0
+  recorded 605 strokes (625 downs at chain-out), 19339 log entries, 1978 kB JSON, 90.6 s
+chrome-sw: live vs same-page replay [353 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME cf14ec5b | L2 SAME e9085c2a | first diff cp none | fills 2963/2963px mask Δ0, 1/1px mask Δ0
+chrome-sw: live vs same-page replay #2 [369 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME cf14ec5b | L2 SAME e9085c2a | first diff cp none | fills 2963/2963px mask Δ0, 1/1px mask Δ0
+chrome-sw: live vs fresh-page replay [346 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME cf14ec5b | L2 SAME e9085c2a | first diff cp none | fills 2963/2963px mask Δ0, 1/1px mask Δ0
+webkit: Apple GPU
+  Math.random calls outside chain-out while recording: 0
+  recorded 605 strokes (625 downs at chain-out), 21596 log entries, 2002 kB JSON, 132.4 s
+webkit: live vs same-page replay [179 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 84eed543 | L2 SAME c73c5787 | first diff cp none | fills 2981/2981px mask Δ0, 1/1px mask Δ0
+webkit: live vs same-page replay #2 [199 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 84eed543 | L2 SAME c73c5787 | first diff cp none | fills 2981/2981px mask Δ0, 1/1px mask Δ0
+webkit: live vs fresh-page replay [183 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME 84eed543 | L2 SAME c73c5787 | first diff cp none | fills 2981/2981px mask Δ0, 1/1px mask Δ0
+chrome-gpu live vs chrome-sw replay of chrome-gpu log [353 strokes/s]
+  L0 SAME cff66cc5 | L1 9fba87f9≠cf14ec5b max Δ255 286070px (26.488%, alpha-only 2288) | L2 26db3632≠e9085c2a max Δ255 147332px (13.642%, alpha-only 1207) | first diff cp 25 strokes | fills 2963/2963px mask Δ0, 1/1px mask Δ0
+chrome-gpu live vs webkit replay of chrome-gpu log [228 strokes/s]
+  L0 SAME cff66cc5 | L1 9fba87f9≠0848dae2 max Δ255 424374px (39.294%, alpha-only 4441) | L2 26db3632≠2d34381f max Δ255 187615px (17.372%, alpha-only 2343) | first diff cp 25 strokes | fills 2963/2981px mask Δ20, 1/1px mask Δ0
+webkit live vs chrome-gpu replay of webkit log [262 strokes/s]
+  L0 SAME cff66cc5 | L1 84eed543≠335f7563 max Δ255 425450px (39.394%, alpha-only 4414) | L2 c73c5787≠26db3632 max Δ255 187615px (17.372%, alpha-only 2343) | first diff cp 25 strokes | fills 2981/2963px mask Δ20, 1/1px mask Δ0
+{"chrome-gpu":{"outsideRandom":0,"ms":90810,"strokes":605,"chainStrokes":625,"events":19350,"jsonBytes":2025890},"chrome-sw":{"outsideRandom":0,"ms":90554,"strokes":605,"chainStrokes":625,"events":19339,"jsonBytes":2025769},"webkit":{"outsideRandom":0,"ms":132444,"strokes":605,"chainStrokes":625,"events":21596,"jsonBytes":2050113}}

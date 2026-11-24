@@ -1,0 +1,31 @@
+chrome-gpu: ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)
+  recorded 600 strokes (620 downs at chain-out), 14248 log entries, 1906 kB JSON, 88.2 s
+chrome-gpu: live vs same-page replay [321 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME e81ad63a | L2 SAME 26db3632 | first diff cp none
+chrome-gpu: live vs same-page replay #2 [313 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME e81ad63a | L2 SAME 26db3632 | first diff cp none
+chrome-gpu: live vs fresh-page replay [298 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME e81ad63a | L2 SAME 26db3632 | first diff cp none
+chrome-sw: ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)
+  recorded 600 strokes (620 downs at chain-out), 14248 log entries, 1906 kB JSON, 87.9 s
+chrome-sw: live vs same-page replay [473 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME a6cf04ef | L2 SAME e9085c2a | first diff cp none
+chrome-sw: live vs same-page replay #2 [472 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME a6cf04ef | L2 SAME e9085c2a | first diff cp none
+chrome-sw: live vs fresh-page replay [421 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME a6cf04ef | L2 SAME e9085c2a | first diff cp none
+webkit: Apple GPU
+  recorded 600 strokes (620 downs at chain-out), 14248 log entries, 1906 kB JSON, 131.0 s
+webkit: live vs same-page replay [325 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME c36b4c93 | L2 SAME c73c5787 | first diff cp none
+webkit: live vs same-page replay #2 [337 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME c36b4c93 | L2 SAME c73c5787 | first diff cp none
+webkit: live vs fresh-page replay [317 strokes/s]
+  L0 SAME cff66cc5 | L1 SAME c36b4c93 | L2 SAME c73c5787 | first diff cp none
+chrome-gpu live vs chrome-sw replay of chrome-gpu log [454 strokes/s]
+  L0 SAME cff66cc5 | L1 e81ad63a≠a6cf04ef max Δ255 314635px (29.133%, alpha-only 1566) | L2 26db3632≠e9085c2a max Δ255 147332px (13.642%, alpha-only 1207) | first diff cp 25 strokes
+chrome-gpu live vs webkit replay of chrome-gpu log [311 strokes/s]
+  L0 SAME cff66cc5 | L1 e81ad63a≠8137fbe0 max Δ255 385710px (35.714%, alpha-only 3703) | L2 26db3632≠c73c5787 max Δ255 187615px (17.372%, alpha-only 2343) | first diff cp 25 strokes
+webkit live vs chrome-gpu replay of webkit log [328 strokes/s]
+  L0 SAME cff66cc5 | L1 c36b4c93≠034f565d max Δ255 388111px (35.936%, alpha-only 3693) | L2 c73c5787≠26db3632 max Δ255 187615px (17.372%, alpha-only 2343) | first diff cp 25 strokes
+{"chrome-gpu":{"ms":88204,"strokes":600,"chainStrokes":620,"events":14248,"jsonBytes":1951999},"chrome-sw":{"ms":87854,"strokes":600,"chainStrokes":620,"events":14248,"jsonBytes":1951999},"webkit":{"ms":130961,"strokes":600,"chainStrokes":620,"events":14248,"jsonBytes":1951516}}

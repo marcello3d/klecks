@@ -1,0 +1,227 @@
+{
+ "size": "1200x900",
+ "extras": true,
+ "env": {
+  "chrome-gpu": {
+   "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
+   "webgl": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)"
+  }
+ },
+ "record": {
+  "chrome-gpu": {
+   "outsideRandom": 0,
+   "ms": 1087,
+   "strokes": 5,
+   "chainStrokes": 5,
+   "events": 209,
+   "jsonBytes": 22095
+  }
+ },
+ "pairs": [
+  {
+   "name": "chrome-gpu: live vs same-page replay",
+   "strokesPerSec": 22,
+   "layers": [
+    {
+     "i": 0,
+     "hashA": "cff66cc5",
+     "hashB": "cff66cc5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 1,
+     "hashA": "e9080fb0",
+     "hashB": "e9080fb0",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    }
+   ],
+   "firstDifferingCheckpoint": -1,
+   "checkpoints": 5,
+   "cpMatch": "=====",
+   "fills": [
+    {
+     "nA": 1080000,
+     "nB": 1080000,
+     "maskDiff": 0
+    },
+    {
+     "nA": 1080000,
+     "nB": 1080000,
+     "maskDiff": 0
+    }
+   ]
+  },
+  {
+   "name": "chrome-gpu: live vs same-page replay #2",
+   "strokesPerSec": 24,
+   "layers": [
+    {
+     "i": 0,
+     "hashA": "cff66cc5",
+     "hashB": "cff66cc5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 1,
+     "hashA": "e9080fb0",
+     "hashB": "e9080fb0",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    }
+   ],
+   "firstDifferingCheckpoint": -1,
+   "checkpoints": 5,
+   "cpMatch": "=====",
+   "fills": [
+    {
+     "nA": 1080000,
+     "nB": 1080000,
+     "maskDiff": 0
+    },
+    {
+     "nA": 1080000,
+     "nB": 1080000,
+     "maskDiff": 0
+    }
+   ]
+  },
+  {
+   "name": "chrome-gpu: live vs fresh-page replay",
+   "strokesPerSec": 21,
+   "layers": [
+    {
+     "i": 0,
+     "hashA": "cff66cc5",
+     "hashB": "cff66cc5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 1,
+     "hashA": "e9080fb0",
+     "hashB": "e9080fb0",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    }
+   ],
+   "firstDifferingCheckpoint": -1,
+   "checkpoints": 5,
+   "cpMatch": "=====",
+   "fills": [
+    {
+     "nA": 1080000,
+     "nB": 1080000,
+     "maskDiff": 0
+    },
+    {
+     "nA": 1080000,
+     "nB": 1080000,
+     "maskDiff": 0
+    }
+   ]
+  },
+  {
+   "name": "chrome-gpu live vs chrome-sw replay of chrome-gpu log",
+   "strokesPerSec": 21,
+   "layers": [
+    {
+     "i": 0,
+     "hashA": "cff66cc5",
+     "hashB": "cff66cc5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 1,
+     "hashA": "e9080fb0",
+     "hashB": "ecd55f65",
+     "same": false,
+     "maxDelta": 255,
+     "diffPx": 42668,
+     "diffPct": 3.951,
+     "alphaOnly": 541
+    }
+   ],
+   "firstDifferingCheckpoint": 4,
+   "checkpoints": 5,
+   "cpMatch": "====x",
+   "fills": [
+    {
+     "nA": 1080000,
+     "nB": 1080000,
+     "maskDiff": 0
+    },
+    {
+     "nA": 1080000,
+     "nB": 1080000,
+     "maskDiff": 0
+    }
+   ]
+  },
+  {
+   "name": "chrome-gpu live vs webkit replay of chrome-gpu log",
+   "strokesPerSec": 22,
+   "layers": [
+    {
+     "i": 0,
+     "hashA": "cff66cc5",
+     "hashB": "cff66cc5",
+     "same": true,
+     "maxDelta": 0,
+     "diffPx": 0,
+     "diffPct": 0,
+     "alphaOnly": 0
+    },
+    {
+     "i": 1,
+     "hashA": "e9080fb0",
+     "hashB": "c7bf047b",
+     "same": false,
+     "maxDelta": 255,
+     "diffPx": 11144,
+     "diffPct": 1.032,
+     "alphaOnly": 536
+    }
+   ],
+   "firstDifferingCheckpoint": 4,
+   "checkpoints": 5,
+   "cpMatch": "====x",
+   "fills": [
+    {
+     "nA": 1080000,
+     "nB": 1080000,
+     "maskDiff": 0
+    },
+    {
+     "nA": 1080000,
+     "nB": 1080000,
+     "maskDiff": 0
+    }
+   ]
+  }
+ ]
+}

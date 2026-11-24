@@ -96,7 +96,7 @@ if (EXTRAS) {
     actions.push({ op: 'cp', a: {} });
     actions.push({ op: 'fill', a: { x: W * 0.25, y: H * 0.7, rgb: { r: 220, g: 60, b: 10 }, opacity: 0.8, tolerance: 20, sample: 'current', grow: 0, contiguous: true } });
     actions.push({ op: 'cp', a: {} });
-    actions.push({ op: 'text', a: { text: 'Klecks replay\nspike 2draw', x: W * 0.2, y: H * 0.3, angleRad: 0.3, size: 64, align: 'left', isBold: true, isItalic: false, font: 'sans-serif', letterSpacing: 0, lineHeight: 1, fill: { color: { r: 10, g: 10, b: 10, a: 1 } }, stroke: { color: { r: 250, g: 200, b: 0, a: 0.8 }, lineWidth: 3 } } });
+    if (!args.includes('--no-text')) actions.push({ op: 'text', a: { text: 'Klecks replay\nspike 2draw', x: W * 0.2, y: H * 0.3, angleRad: 0.3, size: 64, align: 'left', isBold: true, isItalic: false, font: 'sans-serif', letterSpacing: 0, lineHeight: 1, fill: { color: { r: 10, g: 10, b: 10, a: 1 } }, stroke: { color: { r: 250, g: 200, b: 0, a: 0.8 }, lineWidth: 3 } } });
     actions.push({ op: 'cp', a: {} });
     actions.push({ op: 'filter', a: { filter: 'blur', input: { radius: 6 } } });
     actions.push({ op: 'cp', a: {} });
@@ -210,11 +210,13 @@ function compare(a, b) {
         for (let k = 0; k < ma.length; k++) if (ma[k] !== mb[k]) d++;
         return { nA: fa.n, nB: fb.n, maskDiff: d };
     });
-    return { layers, firstDifferingCheckpoint: firstCp, checkpoints: cps, fills };
+    const cpMatch = a.checkpoints.map((c, i) => (c === b.checkpoints[i] ? '=' : 'x')).join('');
+    return { layers, firstDifferingCheckpoint: firstCp, checkpoints: cps, cpMatch, fills };
 }
 const fmt = (c) =>
     c.layers.map((l) => (l.missing ? `L${l.i}: missing` : `L${l.i} ${l.same ? 'SAME ' + l.hashA : `${l.hashA}≠${l.hashB} max Δ${l.maxDelta} ${l.diffPx}px (${l.diffPct}%, alpha-only ${l.alphaOnly})`}`)).join(' | ') +
     ` | first diff cp ${c.firstDifferingCheckpoint < 0 ? 'none' : (c.firstDifferingCheckpoint + 1) * CP_EVERY + ' strokes'}` +
+    (c.cpMatch.length <= 12 ? ` | cps ${c.cpMatch}` : '') +
     (c.fills.length ? ` | fills ${c.fills.map((f) => `${f.nA}/${f.nB}px mask Δ${f.maskDiff}`).join(', ')}` : '');
 
 const report = { size: `${W}x${H}`, extras: EXTRAS, env: {}, record: {}, pairs: [] };

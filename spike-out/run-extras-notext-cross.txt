@@ -1,0 +1,4 @@
+chrome-gpu live vs chrome-sw replay of chrome-gpu log [21 strokes/s]
+  L0 SAME cff66cc5 | L1 e9080fb0≠ecd55f65 max Δ255 42668px (3.951%, alpha-only 541) | first diff cp 125 strokes | cps ====x | fills 1080000/1080000px mask Δ0, 1080000/1080000px mask Δ0
+chrome-gpu live vs webkit replay of chrome-gpu log [22 strokes/s]
+  L0 SAME cff66cc5 | L1 e9080fb0≠c7bf047b max Δ255 11144px (1.032%, alpha-only 536) | first diff cp 125 strokes | cps ====x | fills 1080000/1080000px mask Δ0, 1080000/1080000px mask Δ0
