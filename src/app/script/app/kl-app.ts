@@ -434,7 +434,10 @@ export class KlApp {
             chainArr: [this.lineSanitizer as any, lineSmoothing as any],
         });
 
-        drawEventChain.setChainOut(((event: TDrawEvent) => {
+        // SPIKE (replay determinism, spike-replay branch): window.__klSpike sees every
+        // chain-out event first (it quantizes, reseeds Math.random, logs) and can replay a log.
+        const spikeHook = (window as any).__klSpike;
+        const chainOutFn = (event: TDrawEvent) => {
             if (event.type === 'down') {
                 this.toolspace.style.pointerEvents = 'none';
                 currentBrushUi.startLine(event.x, event.y, event.pressure);
@@ -456,6 +459,10 @@ export class KlApp {
                 this.easelBrush.setLastDrawEvent({ x: event.x1, y: event.y1 });
                 this.easel.requestRender();
             }
+        };
+        drawEventChain.setChainOut(((event: TDrawEvent) => {
+            chainOutFn(spikeHook ? spikeHook.onChainOut(event) : event);
+            spikeHook?.afterChainOut();
         }) as any);
 
         let textToolSettings = {
@@ -643,6 +650,7 @@ export class KlApp {
         let isFirstTransform = true;
         this.easel = new Easel({
             onBeforeRender: () => {
+                (window as any).__klSpike?.onTransfer();
                 currentBrushUi?.getBrush().transferToCanvas?.();
             },
             width: Math.max(0, this.uiWidth - this.toolWidth),
@@ -2330,6 +2338,18 @@ export class KlApp {
             });
         }
         this.saveReminder?.init();
+        spikeHook?.attach({
+            chainOut: chainOutFn,
+            chainIn: (e: any) => drawEventChain.chainIn(e),
+            klCanvas: this.klCanvas,
+            klHistory: this.klHistory,
+            setBrush: (id: TBrushId) => setCurrentBrush(id),
+            brushUi: () => currentBrushUi,
+            setColor: (c: TRgb) => brushSettingService.setColor(new BB.RGB(c.r, c.g, c.b)),
+            setLayer: (i: number) => setCurrentLayer(i),
+            getLayerIndex: () => currentLayerIndex,
+            filters: KL.FILTER_LIB,
+        });
     }
 
     // -------- interface --------

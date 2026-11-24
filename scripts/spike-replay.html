@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<!-- SPIKE (throwaway): the page scripts/spike-replay.mjs drives. Klecks embed with
+     window.__klSpike: quantizes, reseeds and logs chain-out events (kl-app.ts), and replays a log.
+     ?w=&h= canvas size (default 1200×900) -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Klecks replay spike</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+<script>
+    // Seeded Math.random, installed before the embed loads (module-level random tables too).
+    let prngState = 0x2d2d2d2d;
+    const mulberry32 = () => {
+        let t = (prngState += 0x6d2b79f5);
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const reseed = (s) => (prngState = s >>> 0);
+    // Two streams: the brush's (reseeded per stroke) only while a chain-out event is being
+    // drawn, and everyone else's. Without this, other code calling Math.random between two
+    // moves of a live stroke shifts the brush's sequence (found with the blend brush).
+    const nativeRandom = Math.random;
+    let inBrush = false;
+    let outsideCalls = 0;
+    Math.random = () => {
+        if (inBrush) return mulberry32();
+        outsideCalls++;
+        return nativeRandom();
+    };
+
+    const q32 = (v) => (v == null ? v : Math.round(v * 32) / 32);
+    const qp = (v) => (v == null ? v : Math.round(Math.max(0, Math.min(1, v)) * 255) / 255);
+
+    const fnv = (data) => {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < data.length; i++) {
+            h ^= data[i];
+            h = Math.imul(h, 0x01000193);
+        }
+        return (h >>> 0).toString(16).padStart(8, '0');
+    };
+
+    const spike = {
+        api: null,
+        mode: 'record',
+        log: [],
+        nextSeed: 1,
+        strokes: 0,
+        checkpoints: [],
+        fillMasks: [],
+        attach(api) {
+            spike.api = api;
+        },
+        // brush state that lives across strokes (found by the spike): sketchy's seed
+        brushState() {
+            const b = spike.api.brushUi().getBrush();
+            return b.getSeed ? { sketchySeed: b.getSeed() } : undefined;
+        },
+        setBrushState(st) {
+            if (st && st.sketchySeed !== undefined) spike.api.brushUi().getBrush().setSeed(st.sketchySeed);
+        },
+        onChainOut(e) {
+            if (spike.mode !== 'record') return e;
+            inBrush = true;
+            const q = { ...e };
+            if ('x' in q) {
+                q.x = q32(q.x);
+                q.y = q32(q.y);
+            }
+            if (q.type === 'line') {
+                q.x0 = q32(q.x0);
+                q.y0 = q32(q.y0);
+                q.x1 = q32(q.x1);
+                q.y1 = q32(q.y1);
+                q.pressure0 = qp(q.pressure0);
+                q.pressure1 = qp(q.pressure1);
+            }
+            if ('pressure' in q) q.pressure = qp(q.pressure);
+            const entry = { k: 'ev', e: q };
+            if (q.type === 'down' || q.type === 'line') {
+                entry.seed = spike.nextSeed++;
+                entry.st = spike.brushState();
+                reseed(entry.seed);
+                spike.strokes++;
+            }
+            spike.log.push(entry);
+            return q;
+        },
+        // the easel's onBeforeRender flushes the brush's pending cells (transferToCanvas) once a
+        // frame, and blend's output depends on when (found by the spike): log it, replay it
+        logTransfers: true,
+        onTransfer() {
+            if (spike.mode === 'record' && spike.logTransfers) spike.log.push({ k: 'tx' });
+        },
+        afterChainOut() {
+            inBrush = false;
+        },
+        outsideCalls: () => outsideCalls,
+        // ---- ops: logged in record mode, run the same way on replay ----
+        runOp(name, a) {
+            const api = spike.api;
+            const kc = api.klCanvas;
+            const li = () => api.getLayerIndex();
+            if (name === 'brush') {
+                api.setBrush(a.id);
+                const ui = api.brushUi();
+                const b = ui.getBrush();
+                ui.setSize(a.size);
+                ui.setOpacity(a.opacity);
+                if (a.id !== 'eraserBrush') api.setColor(a.color);
+                const x = a.x || {};
+                if (a.id === 'penBrush') { b.setScatter(x.scatter); b.setAlpha(x.alpha); b.sizePressure(x.sizePressure); }
+                if (a.id === 'blendBrush') b.setBlending(x.blending);
+                if (a.id === 'sketchyBrush') { b.setScale(x.scale); b.setBlending(x.blending); }
+                if (a.id === 'pixelBrush') b.setTip(x.tip);
+                if (a.id === 'chemyBrush') { b.setMode(x.mode); b.setDistort(x.distort); b.setXSymmetry(x.xSym); b.setGradient(x.gradient); }
+            } else if (name === 'layer') {
+                api.setLayer(a.i);
+            } else if (name === 'addLayer') {
+                const i = kc.addLayer();
+                api.setLayer(i);
+            } else if (name === 'cp') {
+                spike.checkpoints.push(spike.hashes().map((l) => l.hash).join(','));
+            } else if (name === 'fill') {
+                const ctx = kc.getLayer(li()).context;
+                const w = kc.getWidth(), h = kc.getHeight();
+                const before = ctx.getImageData(0, 0, w, h).data;
+                kc.floodFill(li(), a.x, a.y, a.rgb, a.opacity, a.tolerance, a.sample, a.grow, a.contiguous);
+                const after = ctx.getImageData(0, 0, w, h).data;
+                const mask = new Uint8Array(w * h);
+                let n = 0;
+                for (let i = 0; i < w * h; i++) {
+                    const j = i * 4;
+                    if (before[j] !== after[j] || before[j + 1] !== after[j + 1] || before[j + 2] !== after[j + 2] || before[j + 3] !== after[j + 3]) {
+                        mask[i] = 1;
+                        n++;
+                    }
+                }
+                spike.fillMasks.push({ n, mask: b64(mask) });
+            } else if (name === 'text') {
+                kc.text(li(), a);
+            } else if (name === 'filter') {
+                api.filters[a.filter].apply({ layer: kc.getLayer(li()), klCanvas: kc, input: a.input, klHistory: api.klHistory });
+            } else {
+                throw new Error('unknown op ' + name);
+            }
+        },
+        op(name, a = {}) {
+            if (spike.mode === 'record') spike.log.push({ k: 'op', name, a });
+            spike.runOp(name, a);
+        },
+        // feed one stroke into the head of the chain (LineSanitizer → LineSmoothing → chain-out)
+        async stroke(points, gapMs) {
+            const api = spike.api;
+            const ev = (type, p) => ({ type, scale: 1, shiftIsPressed: false, isCoalesced: false, ...(p ? { x: p[0], y: p[1], pressure: p[2] } : {}) });
+            api.chainIn(ev('down', points[0]));
+            for (let i = 1; i < points.length; i++) {
+                if (gapMs) await new Promise((r) => setTimeout(r, gapMs));
+                api.chainIn(ev('move', points[i]));
+            }
+            api.chainIn(ev('up'));
+            // let LineSmoothing's timers finish
+            await new Promise((r) => setTimeout(r, 40));
+        },
+        // back to the starting picture: white background + one empty layer, layer 1 selected
+        reset() {
+            const kc = spike.api.klCanvas;
+            while (kc.getLayerCount() > 2) kc.removeLayer(kc.getLayerCount() - 1);
+            // through KlCanvas so the history's composed tiles (which the blend brush reads) follow
+            kc.layerFill(0, { r: 255, g: 255, b: 255 });
+            kc.layerFill(1, { r: 0, g: 0, b: 0 }, 'destination-out');
+            spike.api.setLayer(1);
+            spike.checkpoints = [];
+            spike.fillMasks = [];
+        },
+        async replay(log, yieldMs = 0) {
+            spike.mode = 'replay';
+            spike.reset();
+            if (yieldMs) await new Promise((r) => setTimeout(r, yieldMs));
+            const t0 = performance.now();
+            let strokes = 0;
+            for (const entry of log) {
+                if (yieldMs && entry.k === 'ev' && (spike.yieldEveryEvent || entry.e.type === 'down')) {
+                    if (spike.yieldMode === 'raf') await new Promise((r) => requestAnimationFrame(() => r()));
+                    else if (spike.yieldMode === 'micro') await Promise.resolve();
+                    else await new Promise((r) => setTimeout(r, yieldMs));
+                }
+                if (entry.k === 'ev') {
+                    if (entry.seed !== undefined) {
+                        spike.setBrushState(entry.st);
+                        reseed(entry.seed);
+                        strokes++;
+                    }
+                    inBrush = true;
+                    spike.api.chainOut({ ...entry.e });
+                    inBrush = false;
+                } else if (entry.k === 'tx') {
+                    if (spike.logTransfers) spike.api.brushUi().getBrush().transferToCanvas?.();
+                } else {
+                    spike.runOp(entry.name, entry.a);
+                }
+            }
+            const ms = performance.now() - t0;
+            return { ms, strokes };
+        },
+        hashes() {
+            const kc = spike.api.klCanvas;
+            const w = kc.getWidth(), h = kc.getHeight();
+            const out = [];
+            for (let i = 0; i < kc.getLayerCount(); i++) {
+                const d = kc.getLayer(i).context.getImageData(0, 0, w, h).data;
+                out.push({ hash: fnv(d), data: d });
+            }
+            return out;
+        },
+        result(withData = true) {
+            return {
+                layers: spike.hashes().map((l) => ({ hash: l.hash, data: withData ? b64(l.data) : null })),
+                checkpoints: spike.checkpoints,
+                fillMasks: spike.fillMasks,
+                width: spike.api.klCanvas.getWidth(),
+                height: spike.api.klCanvas.getHeight(),
+            };
+        },
+        env() {
+            const c = document.createElement('canvas');
+            const gl = c.getContext('webgl');
+            const ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+            return { ua: navigator.userAgent, webgl: gl ? (ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) : null };
+        },
+    };
+    const b64 = (u8) => {
+        let s = '';
+        for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+        return btoa(s);
+    };
+    window.__klSpike = spike;
+</script>
+<script src="/dist/embed.js"></script>
+<script>
+    const qs = new URLSearchParams(location.search);
+    window.ready = (async () => {
+        window.klecks = new Klecks({ onSubmit: (onSuccess) => onSuccess() });
+        klecks.openProject({
+            width: Number(qs.get('w') || 1200),
+            height: Number(qs.get('h') || 900),
+            layers: [
+                { name: 'Background', opacity: 1, image: { fill: '#fff' } },
+                { name: 'Layer 1', opacity: 1, image: { fill: 'transparent' } },
+            ],
+        });
+        while (!spike.api) await new Promise((r) => setTimeout(r, 20));
+        // every brush once, so their lazy setup (alpha canvases etc) happened before recording
+        spike.mode = 'warm';
+        spike.reset();
+    })();
+</script>
+</body>
+</html>
