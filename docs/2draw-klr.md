@@ -111,3 +111,11 @@ Chunks are sealed in a quiet gap (1.5 s without an op, not drawing) once the ope
 - The player replays from the start; seeking needs checkpoints (phase 3).
 - Sealing reads every layer: at 4096² with many layers that is a long pause in a quiet gap.
 - Text depends on the fonts the browser has.
+
+## Measured (2026-11-26, `node scripts/test-klr.mjs`, 1200×900)
+
+127 strokes over all seven brushes plus every op type, 10 chunks: about 25.5 kB, 201 B per
+stroke all in, 178 B per stroke for the stroke ops alone (strokes of 8 to 32 points, about 6 to
+7 B per point with transfers and settings). Fresh-page replay with the headless player: every
+layer and every chunk hash equal, in Chrome and in WebKit (each its own recording), 140 strokes/s
+including the filters; the catch-all never fired.
