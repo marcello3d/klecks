@@ -198,6 +198,11 @@ export class EmbedWrapper {
         return this.embed ? this.embed.getKlrChunks() : null;
     };
 
+    // the draft: checkpoints, their main-thread ms, bytes, restore time; null without one
+    getDraftInfo = () => {
+        return this.embed ? this.embed.getDraftInfo() : null;
+    };
+
     // recording: 'klr'. Ops, strokes, bytes, chunks, and catch-all uses (each one a bug).
     getKlrInfo = () => {
         return this.embed ? this.embed.getKlrInfo() : null;

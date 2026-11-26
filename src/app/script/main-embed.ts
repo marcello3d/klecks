@@ -8,7 +8,7 @@ import { KL_CONFIG } from './klecks/kl-config';
 import { asyncThrow, randomUuid } from './bb/base/base';
 import { initIconCss } from './icon/icon';
 import { getMixModeStr } from './klecks/canvas/get-mix-mode';
-import { EmbedDraft, restoreDraft, TDraftRestored, TEmbedDraft } from './embed/embed-draft';
+import { EmbedDraft, restoreDraft, TDraftInfo, TDraftRestored, TEmbedDraft } from './embed/embed-draft';
 import { EmbedRecording, TRecordingInfo } from './embed/embed-recording';
 import { KlrRecorder, TKlrChunks, TKlrInfo } from './klr/klr-recorder';
 import { TKlrStart } from './klr/klr-format';
@@ -93,6 +93,8 @@ export class Embed {
     private restoredDraft: TDraftRestored | undefined;
     private recording: EmbedRecording | undefined;
     private klr: KlrRecorder | undefined;
+    private draft: EmbedDraft | undefined;
+    private restoreMs: number | undefined;
 
     onProjectReady(embedProject: TKlEmbedProject) {
         if (this.isRestoringDraft) {
@@ -125,11 +127,15 @@ export class Embed {
             if (this.p.recording === 'klr') {
                 try {
                     const api = this.klApp.getKlrApi();
+                    const restoredKlr = this.restoredDraft?.klr;
                     this.klr = new KlrRecorder({
                         api,
+                        // a draft without one (tiles-1, or recorded without 'klr'): a new
+                        // recording from the restored picture
                         start: this.restoredDraft
-                            ? { kind: 'reference', url: this.p.klrStartUrl ?? '' } // phase 2
+                            ? { kind: 'reference', url: this.p.klrStartUrl ?? '' }
                             : klrStartOf(embedProject, this.p.klrStartUrl),
+                        restored: restoredKlr,
                     });
                 } catch (e) {
                     console.error('Recording unavailable', e);
@@ -147,11 +153,12 @@ export class Embed {
                 }
             }
             if (this.p.draft) {
-                new EmbedDraft({
+                this.draft = new EmbedDraft({
                     klApp: this.klApp,
                     store: this.p.draft.store,
                     restored: this.restoredDraft,
                     recording: this.recording,
+                    klr: this.klr,
                 });
             }
 
@@ -180,8 +187,10 @@ export class Embed {
         const draft = p.draft;
         if (draft?.saved) {
             this.isRestoringDraft = true;
+            const restoreStart = performance.now();
             restoreDraft(draft.saved).then(
                 (restored) => {
+                    this.restoreMs = performance.now() - restoreStart;
                     this.isRestoringDraft = false;
                     this.fallbackProject = undefined;
                     this.restoredDraft = restored;
@@ -254,6 +263,11 @@ export class Embed {
 
     getKlrInfo(): TKlrInfo | null {
         return this.klr ? this.klr.getInfo() : null;
+    }
+
+    // what the draft did: checkpoints, their main-thread ms, bytes; how long restoring took
+    getDraftInfo(): (TDraftInfo & { restoreMs?: number }) | null {
+        return this.draft ? { ...this.draft.getInfo(), restoreMs: this.restoreMs } : null;
     }
 
     readPSDs(psds: TReadPSD[]) {

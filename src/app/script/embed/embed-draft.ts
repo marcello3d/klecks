@@ -13,6 +13,7 @@ import { randomUuid } from '../bb/base/base';
 import { BB } from '../bb/bb';
 import { EmbedInput, getEmbedInput } from './embed-input';
 import type { EmbedRecording, TRecordingClip, TRecordingRestored } from './embed-recording';
+import type { KlrRecorder, TKlrDraftState } from '../klr/klr-recorder';
 import {
     base64ToBytes,
     bytesToBase64,
@@ -39,6 +40,15 @@ import {
  *
  * A save appends the tiles that weren't saved yet and replaces the tail. When most saved tiles
  * aren't used anymore, the next save starts over (fresh) with the live ones.
+ *
+ * Format 'klecks-tiles-2' (written since the .klr recording; tiles-1 is still read, forever):
+ * tiles-1 plus, with recording: 'klr' (klr/klr-recorder.ts), TTail.klr: the recording's HEAD,
+ * its sealed OPS chunks as pieces of their own (one each), and the open chunk in the tail. Saves
+ * are checkpoints: in a quiet gap, every CHECKPOINT_MS or CHECKPOINT_CHANGES picture changes,
+ * whichever comes first, and on flush. The tiles and the recording in a save are taken at the
+ * same moment, so a restored draft and its recording agree: the picture opens from the tiles
+ * (never by replay) with a fresh undo history, and the recording goes on with a RESTORE op.
+ * A tiles-1 draft's video pieces are dropped under recording: 'klr' (no timelapse).
  */
 
 export type TEmbedDraftSaved = {
@@ -68,11 +78,15 @@ export type TEmbedDraft = {
     store: TEmbedDraftStore;
 };
 
-export const TILES_FORMAT = 'klecks-tiles-1';
-const TILES_HEAD = 'klecks draft: tiles, klecks-tiles-1\n';
+export const TILES_FORMAT = 'klecks-tiles-2';
+const TILES_FORMATS_READ = ['klecks-tiles-1', 'klecks-tiles-2'];
+const TILES_HEAD = 'klecks draft: tiles, klecks-tiles-2\n';
+// checkpoints: whichever comes first, in a quiet gap
+export const CHECKPOINT_MS = 30_000;
+export const CHECKPOINT_CHANGES = 50; // picture changes (strokes, fills, ...) since the last one
 const ENC_RAW = 0;
 const ENC_DEFLATE = 1;
-const QUIET_MS = 300; // the pen rests this long before a save
+const QUIET_MS = 500; // the pen rests this long before a save (not between fast strokes)
 const BATCH = 8; // tiles per worker task. Input is checked in between.
 const PIECE_MAX = 1024 * 1024;
 const COMPACT_MIN_BYTES = 4 * 1024 * 1024;
@@ -98,13 +112,27 @@ type TTail = {
         tiles: (TTileRef | string)[];
     }[];
     video?: TVideoTail;
+    klr?: TKlrTail; // tiles-2
+};
+
+type TKlrTail = {
+    v: 1;
+    head: string; // base64: magic + HEAD chunk
+    pieces: number[]; // the sealed OPS chunks, one piece each, in order
+    open: string | null; // base64: the open OPS chunk
+    elapsedMs: number;
+    seed: number;
+    id: number;
 };
 
 export type TDraftRestored = {
+    format: string;
     project: TKlProject;
     refs: Map<string, TTileRef>;
     pieceSizes: number[];
     video?: TRecordingRestored;
+    klr?: TKlrDraftState;
+    klrPieces?: number[]; // where klr.sealed is
 };
 
 // Deflates or inflates. Self-contained, as it also runs in the worker.
@@ -191,7 +219,11 @@ function concatBytes(parts: Uint8Array[], size: number): Uint8Array {
 
 export async function restoreDraft(saved: TEmbedDraftSaved): Promise<TDraftRestored> {
     const tail = JSON.parse(new TextDecoder().decode(saved.tail)) as TTail;
-    if (saved.format !== TILES_FORMAT || tail.format !== TILES_FORMAT || tail.v !== 1) {
+    if (
+        !TILES_FORMATS_READ.includes(saved.format) ||
+        tail.format !== saved.format ||
+        tail.v !== 1
+    ) {
         throw new Error('Unsupported draft format: ' + saved.format);
     }
     // Every saved tile gets an id, so the next save only appends new tiles.
@@ -246,11 +278,35 @@ export async function restoreDraft(saved: TEmbedDraftSaved): Promise<TDraftResto
         imageDataById,
     });
     return {
+        format: saved.format,
         project,
         refs,
         pieceSizes: saved.pieces.map((piece) => piece.length),
         video: tail.video ? restoreVideo(tail.video, saved.pieces) : undefined,
+        klr: tail.klr ? restoreKlr(tail.klr, saved.pieces) : undefined,
+        klrPieces: tail.klr?.pieces.slice(),
     };
+}
+
+// The .klr in a draft. One that can't be read is dropped: the drawing opens, the recording
+// starts over (from this picture, as a reference).
+function restoreKlr(klr: TKlrTail, pieces: Uint8Array[]): TKlrDraftState | undefined {
+    try {
+        if (klr.v !== 1 || !klr.pieces.every((i) => i >= 0 && i < pieces.length)) {
+            throw new Error('bad klr tail');
+        }
+        return {
+            head: base64ToBytes(klr.head),
+            sealed: klr.pieces.map((i) => pieces[i].slice()),
+            open: klr.open ? base64ToBytes(klr.open) : null,
+            elapsedMs: klr.elapsedMs,
+            seed: klr.seed,
+            id: klr.id,
+        };
+    } catch (e) {
+        console.error('Draft recording (.klr) unreadable, dropped', e);
+        return undefined;
+    }
 }
 
 // The recording in a draft. One that can't be read is dropped: the drawing opens without it.
@@ -287,6 +343,19 @@ export type TEmbedDraftParams = {
     store: TEmbedDraftStore;
     restored?: TDraftRestored;
     recording?: EmbedRecording; // saved with the tiles
+    klr?: KlrRecorder; // saved with the tiles (tiles-2)
+};
+
+export type TDraftInfo = {
+    format: string;
+    checkpoints: number;
+    // main-thread time of a checkpoint (deflating is in a worker; the store's own write isn't
+    // counted), the last and the longest
+    lastMs: number;
+    maxMs: number;
+    savedBytes: number; // pieces, as stored
+    tailBytes: number;
+    klrPieces: number;
 };
 
 /**
@@ -299,6 +368,20 @@ export class EmbedDraft {
     private readonly store: TEmbedDraftStore;
     private readonly input: EmbedInput;
     private readonly recording: EmbedRecording | undefined;
+    private readonly klr: KlrRecorder | undefined;
+    private klrPieces: number[] = []; // pieces holding the sealed chunks saved so far
+    private lastCheckpointMs = performance.now();
+    private busyMs = 0; // main-thread time of the save running
+    private busyFrom = 0;
+    private readonly info: TDraftInfo = {
+        format: TILES_FORMAT,
+        checkpoints: 0,
+        lastMs: 0,
+        maxMs: 0,
+        savedBytes: 0,
+        tailBytes: 0,
+        klrPieces: 0,
+    };
     private pictureKey: unknown[];
     private changeSeq: number = 0;
     private savedSeq: number = 0;
@@ -330,7 +413,30 @@ export class EmbedDraft {
         this.pictureKey = key;
         this.changeSeq++;
         this.store.changed();
+        if (this.changeSeq - this.savedSeq >= CHECKPOINT_CHANGES && this.timeout !== undefined) {
+            // waiting for the clock: now it's the count
+            clearTimeout(this.timeout);
+            this.timeout = undefined;
+        }
         this.schedule();
+    }
+
+    // ms until a checkpoint is due (0 or less: due)
+    private dueInMs(): number {
+        if (this.changeSeq - this.savedSeq >= CHECKPOINT_CHANGES) {
+            return 0;
+        }
+        return this.lastCheckpointMs + CHECKPOINT_MS - performance.now();
+    }
+
+    // awaits p without counting the wait as the save's main-thread time
+    private async w<T>(p: Promise<T>): Promise<T> {
+        this.busyMs += performance.now() - this.busyFrom;
+        try {
+            return await p;
+        } finally {
+            this.busyFrom = performance.now();
+        }
     }
 
     private schedule(): void {
@@ -343,11 +449,12 @@ export class EmbedDraft {
         ) {
             return;
         }
-        const waitMs = this.klApp.isDrawing() ? QUIET_MS : this.input.waitMs(QUIET_MS);
+        const quietMs = this.klApp.isDrawing() ? QUIET_MS : this.input.waitMs(QUIET_MS);
+        const waitMs = Math.max(quietMs, this.dueInMs());
         this.timeout = setTimeout(
             () => {
                 this.timeout = undefined;
-                if (this.isBusy()) {
+                if (this.isBusy() || this.dueInMs() > 0) {
                     this.schedule();
                 } else {
                     void this.startSave();
@@ -392,8 +499,12 @@ export class EmbedDraft {
     }
 
     private async save(): Promise<void> {
+        this.busyMs = 0;
+        this.busyFrom = performance.now();
         const seq = this.changeSeq;
         const composed = this.klApp.getKlHistory().getComposed();
+        // the recording at the same moment as the picture
+        const klrState = this.klr?.getDraftState();
         const layers = getLayers(composed);
         const fresh = !this.hasCopy || this.compactWanted;
         const known = fresh ? new Map<string, TTileRef>() : this.refs;
@@ -414,10 +525,10 @@ export class EmbedDraft {
         try {
             const todo = [...tiles.values()].filter((tile) => !this.encoded.has(tile.id));
             for (let i = 0; i < todo.length; i += BATCH) {
-                await this.giveWay();
+                await this.w(this.giveWay());
                 // flushing: stored raw, no worker round trip
                 const enc = this.isUrgent || !canDeflate ? ENC_RAW : ENC_DEFLATE;
-                await Promise.all(
+                await this.w(Promise.all(
                     todo.slice(i, i + BATCH).map(async (tile) => {
                         const d = tile.data.data;
                         const bytes =
@@ -426,7 +537,7 @@ export class EmbedDraft {
                                 : await deflateInWorker(d, false);
                         this.encoded.set(tile.id, { bytes, enc });
                     }),
-                );
+                ));
             }
 
             const firstPiece = fresh ? 0 : this.pieceSizes.length;
@@ -445,7 +556,7 @@ export class EmbedDraft {
                 const { bytes, enc } = this.encoded.get(tile.id)!;
                 if (size + bytes.length > PIECE_MAX) {
                     closePiece();
-                    await this.giveWay();
+                    await this.w(this.giveWay());
                 }
                 const { width, height } = tile.data;
                 newRefs.set(tile.id, [
@@ -465,7 +576,7 @@ export class EmbedDraft {
             let video: TVideoTail | undefined;
             const videoCommit: { clip: TRecordingClip; to: number; pieces: number[] }[] = [];
             if (this.recording) {
-                const parts = await this.recording.prepareSave(this.isUrgent, fresh);
+                const parts = await this.w(this.recording.prepareSave(this.isUrgent, fresh));
                 if (parts.length) {
                     video = { v: 1, clips: [] };
                     for (const { clip, from, to } of parts) {
@@ -488,6 +599,25 @@ export class EmbedDraft {
                 }
             }
 
+            // the recording: sealed chunks not saved yet (all of them when fresh), a piece each
+            let klr: TKlrTail | undefined;
+            const klrPieces = fresh ? [] : this.klrPieces.slice();
+            if (klrState) {
+                for (const chunk of klrState.sealed.slice(klrPieces.length)) {
+                    klrPieces.push(firstPiece + append.length);
+                    append.push(chunk);
+                }
+                klr = {
+                    v: 1,
+                    head: bytesToBase64(klrState.head),
+                    pieces: klrPieces,
+                    open: klrState.open ? bytesToBase64(klrState.open) : null,
+                    elapsedMs: Math.round(klrState.elapsedMs),
+                    seed: klrState.seed,
+                    id: klrState.id,
+                };
+            }
+
             const tail: TTail = {
                 format: TILES_FORMAT,
                 v: 1,
@@ -507,18 +637,20 @@ export class EmbedDraft {
                     ),
                 })),
                 ...(video ? { video } : {}),
+                ...(klr ? { klr } : {}),
             };
+            const tailBytes = new TextEncoder().encode(JSON.stringify(tail));
             const withThumb =
                 this.isUrgent || performance.now() - this.lastThumbMs > THUMB_EVERY_MS;
-            const thumb = withThumb ? await this.makeThumb() : undefined;
-            await this.giveWay();
-            await this.store.save({
+            const thumb = withThumb ? await this.w(this.makeThumb()) : undefined;
+            await this.w(this.giveWay());
+            await this.w(this.store.save({
                 format: TILES_FORMAT,
                 ...(fresh ? { head: new TextEncoder().encode(TILES_HEAD), fresh: true } : {}),
                 append,
-                tail: new TextEncoder().encode(JSON.stringify(tail)),
+                tail: tailBytes,
                 ...(thumb ? { thumb } : {}),
-            });
+            }));
 
             if (thumb) {
                 this.lastThumbMs = performance.now();
@@ -533,9 +665,18 @@ export class EmbedDraft {
             });
             this.pieceSizes.push(...append.map((piece) => piece.length));
             this.recording?.committed(videoCommit);
+            this.klrPieces = klrPieces;
             this.hasCopy = true;
             this.savedSeq = seq;
+            this.lastCheckpointMs = performance.now();
             this.compactWanted = this.shouldCompact(layers);
+            this.busyMs += performance.now() - this.busyFrom;
+            this.info.checkpoints++;
+            this.info.lastMs = this.busyMs;
+            this.info.maxMs = Math.max(this.info.maxMs, this.busyMs);
+            this.info.savedBytes = this.pieceSizes.reduce((n, size) => n + size, 0);
+            this.info.tailBytes = tailBytes.length;
+            this.info.klrPieces = klrPieces.length;
         } catch (e) {
             if (e !== ABORTED) {
                 this.failedSeq = seq;
@@ -556,7 +697,8 @@ export class EmbedDraft {
         }
         let liveBytes = 0;
         live.forEach((ref) => (liveBytes += ref[2]));
-        // the recording's pieces are all live
+        // the recordings' pieces are all live
+        this.klrPieces.forEach((i) => (liveBytes += this.pieceSizes[i] ?? 0));
         this.recording?.clips.forEach((clip) =>
             clip.pieces.forEach((i) => (liveBytes += this.pieceSizes[i] ?? 0)),
         );
@@ -573,16 +715,28 @@ export class EmbedDraft {
         this.store = p.store;
         this.input = getEmbedInput();
         this.recording = p.recording;
+        this.klr = p.klr;
         const composed = this.klApp.getKlHistory().getComposed();
         this.pictureKey = getPictureKey(composed);
         if (p.restored) {
             this.hasCopy = true;
             this.refs = p.restored.refs;
             this.pieceSizes = p.restored.pieceSizes;
-            this.compactWanted = this.shouldCompact(getLayers(composed));
+            if (p.restored.klr && this.klr) {
+                // the recorder continues what the draft holds: its sealed chunks are saved
+                // (the open one, sealed now, goes in with the next save)
+                this.klrPieces = p.restored.klrPieces ?? [];
+            }
+            // an older format: start over in this one
+            this.compactWanted =
+                p.restored.format !== TILES_FORMAT || this.shouldCompact(getLayers(composed));
         }
         this.klApp.getKlHistory().addListener(() => this.onHistoryChange());
         this.store.onFlush(() => this.flush());
+    }
+
+    getInfo(): TDraftInfo {
+        return { ...this.info };
     }
 
     // saves now if the picture changed since the last save
