@@ -1,4 +1,5 @@
 import { BB } from '../../bb/bb';
+import { klRandom } from '../utils/kl-random';
 import { changeCanvasDimensions } from '../../bb/base/change-canvas-dimensions';
 import { isLayerFill, TRgb, TRgba } from '../kl-types';
 import { TIndexBounds, TPressureInput } from '../../bb/bb-types';
@@ -289,7 +290,7 @@ export class BlendBrush {
         const randLen = params.size > 30 ? 1024 : 512; // lower lengths lead to noticeable patterns
         const randArr: number[] = [];
         for (let i = 0; i < randLen; i++) {
-            randArr[i] = (Math.random() - 0.5) / 1.001 + 0.5;
+            randArr[i] = (klRandom() - 0.5) / 1.001 + 0.5;
         }
 
         // thin lines take more than just 1 sample

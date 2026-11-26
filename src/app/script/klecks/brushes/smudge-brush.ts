@@ -1,4 +1,5 @@
 import { BB } from '../../bb/bb';
+import { klRandom } from '../utils/kl-random';
 import { TIndexBounds, TPressureInput, TVector2D } from '../../bb/bb-types';
 import { TRgb } from '../kl-types';
 import { clamp, intersectBounds } from '../../bb/math/math';
@@ -157,7 +158,7 @@ function smudge(imageData: ImageData, mask: Uint8Array | undefined, p: TSmudgePa
     const randLen = cSize > 30 ? 1024 : 512; // lower lengths lead to noticeable patterns
     const randArr: number[] = [];
     for (let i = 0; i < randLen; i++) {
-        randArr[i] = (Math.random() - 0.5) / 1.001 + 0.5;
+        randArr[i] = (klRandom() - 0.5) / 1.001 + 0.5;
     }
 
     const softnessPx = Math.max(3, Math.min(8, p.brush.size - 8));

@@ -1,4 +1,5 @@
 import { BB } from '../../bb/bb';
+import { klRandom } from '../utils/kl-random';
 import { ALPHA_IM_ARR } from './brushes-common';
 import { TPressureInput, TRgb } from '../kl-types';
 import { BezierLine, TBezierLineCallback } from '../../bb/math/line';
@@ -164,8 +165,8 @@ export class PenBrush {
 
         if (scatter > 0) {
             // scatter equally distributed over area of a circle
-            const scatterAngleRad = Math.random() * 2 * Math.PI;
-            const distance = Math.sqrt(Math.random()) * scatter;
+            const scatterAngleRad = klRandom() * 2 * Math.PI;
+            const distance = Math.sqrt(klRandom()) * scatter;
             x += Math.cos(scatterAngleRad) * distance;
             y += Math.sin(scatterAngleRad) * distance;
         }

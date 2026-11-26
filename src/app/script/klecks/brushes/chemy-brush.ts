@@ -1,4 +1,5 @@
 import { BB } from '../../bb/bb';
+import { klRandom } from '../utils/kl-random';
 import { TRgb } from '../kl-types';
 import { ERASE_COLOR } from './erase-color';
 import { KlHistory } from '../history/kl-history';
@@ -306,8 +307,8 @@ export class ChemyBrush {
 
         const pos = { x, y };
         if (this.settingDistort > 0) {
-            pos.x += (Math.random() - 0.5) * this.settingDistort * 80;
-            pos.y += (Math.random() - 0.5) * this.settingDistort * 80;
+            pos.x += (klRandom() - 0.5) * this.settingDistort * 80;
+            pos.y += (klRandom() - 0.5) * this.settingDistort * 80;
         }
 
         this.minY = Math.min(this.minY, pos.y);
