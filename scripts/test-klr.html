@@ -1,6 +1,10 @@
 <!DOCTYPE html>
-<!-- The page scripts/test-klr.mjs drives: the embed with recording: 'klr', or (?player) only the
-     headless .klr player. ?w=&h= canvas size (default 1200×900). -->
+<!-- The page scripts/test-klr.mjs and test-klr-draft.mjs drive: the embed with recording: 'klr',
+     or (?player) only the headless .klr player.
+     ?w=&h=   canvas size (default 1200×900)
+     ?draft   with a draft, kept in IndexedDB (a reload opens it)
+     ?mp4     recording: true (the MP4 timelapse) instead of 'klr'
+     ?idle    no Klecks: only the IndexedDB helpers (to put a draft in place) -->
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -19,18 +23,71 @@
     const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-    if (q.has('player')) {
+    // the draft store, in IndexedDB
+    const db = new Promise((resolve, reject) => {
+        const request = indexedDB.open('klecks-klr-test', 1);
+        request.onupgradeneeded = () => request.result.createObjectStore('drafts');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+    const idb = async (mode, fn) => {
+        const tx = (await db).transaction('drafts', mode);
+        const request = fn(tx.objectStore('drafts'));
+        return new Promise((resolve, reject) => {
+            tx.oncomplete = () => resolve(request.result);
+            tx.onerror = () => reject(tx.error);
+        });
+    };
+    window.draftState = { saves: 0, tail: null, pieces: 0, bytes: 0, tailBytes: 0 };
+    const flushes = [];
+    window.flushDraft = () => Promise.all(flushes.map((f) => f()));
+    window.clearDraft = () => idb('readwrite', (store) => store.delete('draft'));
+    window.exportDraft = async () => {
+        const d = await idb('readonly', (store) => store.get('draft'));
+        return d ? { format: d.format, tail: b64(d.tail), pieces: d.pieces.map(b64) } : null;
+    };
+    window.importDraft = (d) =>
+        idb('readwrite', (store) => store.put({ format: d.format, tail: unb64(d.tail), pieces: d.pieces.map(unb64) }, 'draft'));
+    const draftOption = async () => {
+        let saved = (await idb('readonly', (store) => store.get('draft'))) ?? null;
+        return {
+            saved,
+            store: {
+                save: async ({ format, append, tail, fresh }) => {
+                    const pieces = fresh ? append : [...saved.pieces, ...append];
+                    saved = { format, pieces, tail };
+                    await idb('readwrite', (store) => store.put(saved, 'draft'));
+                    draftState.saves++;
+                    draftState.tail = JSON.parse(new TextDecoder().decode(tail));
+                    draftState.pieces = pieces.length;
+                    draftState.bytes = pieces.reduce((a, p) => a + p.length, 0);
+                    draftState.tailBytes = tail.length;
+                },
+                changed: () => {},
+                onFlush: (flush) => flushes.push(flush),
+                unreadable: (error) => console.error('draft could not be opened', error),
+            },
+        };
+    };
+
+    if (q.has('idle')) {
+        window.ready = Promise.resolve();
+    } else if (q.has('player')) {
         // a fresh page with no app: replay a .klr given as base64
         window.ready = Klecks.loadKlrPlayer().then((KlrPlayer) => {
             window.replay = (base64) => {
                 const player = new KlrPlayer(unb64(base64));
                 const result = player.runAll();
-                return { ...result, hashes: player.getLayerHashes() };
+                return { ...result, hashes: player.getLayerHashes(), hashesFresh: player.getLayerHashes(false) };
             };
         });
     } else {
         window.ready = (async () => {
-            window.klecks = new Klecks({ recording: 'klr', onSubmit: (onSuccess) => onSuccess() });
+            window.klecks = new Klecks({
+                recording: q.has('mp4') ? true : 'klr',
+                onSubmit: (onSuccess) => onSuccess(),
+                ...(q.has('draft') ? { draft: await draftOption() } : {}),
+            });
             klecks.openProject({
                 width: Number(q.get('w') || 1200),
                 height: Number(q.get('h') || 900),
@@ -39,8 +96,10 @@
                     { name: 'Layer 1', opacity: 1, image: { fill: 'transparent' } },
                 ],
             });
-            while (!klecks.getKlrInfo()) await sleep(20);
+            while (!klecks.embed?.klApp) await sleep(20);
             window.api = klecks.embed.klApp.getKlrApi();
+            // every layer's hash as the .klr computes it, read afresh
+            window.liveHashes = () => klecks.embed.klr.hashLayers(false);
         })();
 
         // one stroke into the head of the draw chain (LineSanitizer, LineSmoothing, chain-out),
@@ -56,6 +115,34 @@
             await sleep(40); // LineSmoothing's tail
         };
         window.klrBase64 = () => b64(klecks.getKlr());
+        // what a draft would keep of the recording right now, as one .klr (no sealing)
+        window.klrDraftBase64 = () => {
+            const st = klecks.embed.klr.getDraftState();
+            const parts = [st.head, ...st.sealed, ...(st.open ? [st.open] : [])];
+            const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+            let o = 0;
+            for (const p of parts) { out.set(p, o); o += p.length; }
+            return b64(out);
+        };
+        // the PNG's pixels against another PNG's (base64): count of differing bytes
+        window.pngDiff = async (otherBase64) => {
+            const pixels = async (blob) => {
+                const img = await createImageBitmap(blob);
+                const c = document.createElement('canvas');
+                c.width = img.width;
+                c.height = img.height;
+                const cx = c.getContext('2d', { willReadFrequently: true });
+                cx.drawImage(img, 0, 0);
+                return { w: img.width, h: img.height, d: cx.getImageData(0, 0, img.width, img.height).data };
+            };
+            const a = await pixels(await klecks.getPNG());
+            const b = await pixels(new Blob([unb64(otherBase64)], { type: 'image/png' }));
+            if (a.w !== b.w || a.h !== b.h) return { size: [a.w, a.h, b.w, b.h] };
+            let n = 0;
+            for (let i = 0; i < a.d.length; i++) if (a.d[i] !== b.d[i]) n++;
+            return { differing: n };
+        };
+        window.pngBase64 = async () => b64(new Uint8Array(await (await klecks.getPNG()).arrayBuffer()));
     }
 </script>
 </body>

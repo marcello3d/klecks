@@ -288,15 +288,7 @@ for (const name of browsers) {
         const { done, chunkNames } = await drive(page);
         const base64 = await page.evaluate(() => klrBase64());
         const info = await page.evaluate(() => klecks.getKlrInfo());
-        const live = await page.evaluate(() => {
-            const kc = api.klCanvas;
-            return kc.getLayersReference().map((l) => {
-                const d = l.context.getImageData(0, 0, kc.getWidth(), kc.getHeight()).data;
-                let h = 0x811c9dc5;
-                for (let i = 0; i < d.length; i++) { h ^= d[i]; h = Math.imul(h, 0x01000193); }
-                return h >>> 0;
-            });
-        });
+        const live = await page.evaluate(() => liveHashes());
         await page.close();
         const bytes = Buffer.from(base64, 'base64');
         const file = parseKlr(new Uint8Array(bytes));
