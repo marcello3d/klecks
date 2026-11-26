@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     BRUSH_IDS,
+    ByteReader,
     CANVAS_METHODS,
     CHUNK_OPS,
     encodeChunk,
@@ -21,7 +22,6 @@ import {
     quantizePressure,
     readValue,
 } from '../src/app/script/klr/klr-format.ts';
-import { ByteReader } from '../src/app/script/klr/klr-bytes.ts';
 
 const head = {
     formatVersion: KLR_FORMAT_VERSION,
@@ -89,7 +89,8 @@ function sampleOps() {
         if (i % 5 === 0) ops.push({ op: 'transfer' });
     }
     ops.push({ op: 'up' });
-    ops.push({ op: 'line', x0: 1, y0: 2, x1: 300.5, y1: -4, p0: 1, p1: 1, seed: 2 });
+    ops.push({ op: 'line', x0: 1, y0: 2, x1: 300.5, y1: -4, seed: 2 });
+    ops.push({ op: 'line', x0: null, y0: null, x1: 3, y1: 4, seed: 3 });
     for (const method of CANVAS_METHODS) ops.push({ op: 'canvas', method, args: [1, { x: 0.25 }, 'a'] });
     ops.push({ op: 'filter', name: 'blur', layer: 2, seed: 3, input: { radius: 6 } });
     ops.push({ op: 'undo' }, { op: 'redo' }, { op: 'active', index: 0 });
@@ -100,6 +101,7 @@ function sampleOps() {
     ops.push({
         op: 'tiles',
         tiles: {
+            replaceTop: true,
             size: { width: 300, height: 200 },
             selection: { value: undefined },
             activeLayer: -1,
@@ -139,6 +141,15 @@ test('chunks are self-contained', () => {
     const file = joinKlr(encodeHead(head), [encodeChunk(CHUNK_OPS, a.bytes()), encodeChunk(CHUNK_OPS, b.bytes())]);
     const { chunks } = parseKlr(file);
     assert.deepEqual(chunks[1].ops[0], { op: 'down', t: 0, x: 500, y: 500, p: 1, seed: 1 });
+});
+
+test('an op that does not encode writes nothing', () => {
+    const w = new KlrOpsWriter(0);
+    w.write({ op: 'down', x: 1, y: 1, p: 1, seed: 1 }, 5);
+    const before = w.bytes();
+    assert.throws(() => w.write({ op: 'canvas', method: 'addLayer', args: [0, { image: () => 1 }] }, 9), KlrUnencodable);
+    assert.deepEqual(w.bytes(), before);
+    assert.equal(w.opCount, 1);
 });
 
 test('move is small', () => {

@@ -12,7 +12,7 @@
     "lang:sync": "node src/languages/generate.js sync",
     "lang:build": "node src/languages/generate.js build",
     "icon:build": "node src/icons/generate.js",
-    "test": "node --test scripts/test-recording-unit.mjs && node scripts/test-recording.mjs"
+    "test": "node --test scripts/test-recording-unit.mjs scripts/test-klr-unit.mjs && node scripts/test-recording.mjs && node scripts/test-klr.mjs"
   },
   "dependencies": {
     "@parcel/service-worker": "2.16.4",

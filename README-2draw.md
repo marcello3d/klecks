@@ -31,6 +31,12 @@ a blank canvas or the drawing to continue (`psdUrl`), and on submit the PNG and 
   H.264 `VideoEncoder` don't record. See `docs/2draw-recording.md` and the "Play recording" button in
   `examples/embed/example-draft.html`. Tests: `node --test scripts/test-recording-unit.mjs` and
   `node scripts/test-recording.mjs` (Chrome and WebKit through Playwright).
+- The embed's `recording: 'klr'`: an input recording (`.klr`) of everything that changes the picture, replayed
+  exactly by a headless player in the browser that drew it (`Klecks.loadKlrPlayer()`). `getKlr()`,
+  `getKlrChunks()`, `getKlrInfo()`; `Klecks.features.klr`. With it, `blockOutsideImages` (an embed option, on by
+  default with `'klr'`) keeps images from outside Klecks out: copy and paste work through an in-memory clipboard.
+  The brushes' random numbers come from a seedable PRNG (`klecks/utils/kl-random.ts`) and `KlHistory` has a push
+  observer. See `docs/2draw-klr.md`. Tests: `node --test scripts/test-klr-unit.mjs` and `node scripts/test-klr.mjs`.
 - `scripts/build-2draw.mjs` and this file.
 
 To take upstream changes, merge bitbof/klecks `main` into this branch.

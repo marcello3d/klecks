@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<!-- The page scripts/test-klr.mjs drives: the embed with recording: 'klr', or (?player) only the
+     headless .klr player. ?w=&h= canvas size (default 1200×900). -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Klecks .klr test</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+<script src="/dist/embed.js"></script>
+<script>
+    const q = new URLSearchParams(location.search);
+    const b64 = (u8) => {
+        let s = '';
+        for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+        return btoa(s);
+    };
+    const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    if (q.has('player')) {
+        // a fresh page with no app: replay a .klr given as base64
+        window.ready = Klecks.loadKlrPlayer().then((KlrPlayer) => {
+            window.replay = (base64) => {
+                const player = new KlrPlayer(unb64(base64));
+                const result = player.runAll();
+                return { ...result, hashes: player.getLayerHashes() };
+            };
+        });
+    } else {
+        window.ready = (async () => {
+            window.klecks = new Klecks({ recording: 'klr', onSubmit: (onSuccess) => onSuccess() });
+            klecks.openProject({
+                width: Number(q.get('w') || 1200),
+                height: Number(q.get('h') || 900),
+                layers: [
+                    { name: 'Background', opacity: 1, image: { fill: '#fff' } },
+                    { name: 'Layer 1', opacity: 1, image: { fill: 'transparent' } },
+                ],
+            });
+            while (!klecks.getKlrInfo()) await sleep(20);
+            window.api = klecks.embed.klApp.getKlrApi();
+        })();
+
+        // one stroke into the head of the draw chain (LineSanitizer, LineSmoothing, chain-out),
+        // as the easel's pointer events would, with a gap so frames (transfers) land in between
+        window.stroke = async (points, gapMs = 2) => {
+            const ev = (type, p) => ({ type, scale: 1, shiftIsPressed: false, isCoalesced: false, ...(p ? { x: p[0], y: p[1], pressure: p[2] } : {}) });
+            api.chainIn(ev('down', points[0]));
+            for (let i = 1; i < points.length; i++) {
+                if (gapMs) await sleep(gapMs);
+                api.chainIn(ev('move', points[i]));
+            }
+            api.chainIn(ev('up'));
+            await sleep(40); // LineSmoothing's tail
+        };
+        window.klrBase64 = () => b64(klecks.getKlr());
+    }
+</script>
+</body>
+</html>
