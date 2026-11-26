@@ -10,6 +10,27 @@ import { initIconCss } from './icon/icon';
 import { getMixModeStr } from './klecks/canvas/get-mix-mode';
 import { EmbedDraft, restoreDraft, TDraftRestored, TEmbedDraft } from './embed/embed-draft';
 import { EmbedRecording, TRecordingInfo } from './embed/embed-recording';
+import { KlrRecorder, TKlrChunks, TKlrInfo } from './klr/klr-recorder';
+import { TKlrStart } from './klr/klr-format';
+import { isLayerFill } from './klecks/kl-types';
+
+// a project of plain fills is a blank start the .klr describes itself
+function klrStartOf(project: TKlEmbedProject, url: string | undefined): TKlrStart {
+    if (project.layers.every((layer) => isLayerFill(layer.image as any))) {
+        return {
+            kind: 'blank',
+            layers: project.layers.map((layer) => ({
+                name: layer.name,
+                opacity: layer.opacity,
+                isVisible: layer.isVisible ?? true,
+                mixModeStr: getMixModeStr(layer.mixModeStr),
+                hasClipping: layer.hasClipping ?? false,
+                fill: (layer.image as { fill: string }).fill,
+            })),
+        };
+    }
+    return { kind: 'reference', url: url ?? '' };
+}
 
 initIconCss();
 
@@ -27,7 +48,15 @@ export type TEmbedParams = {
     draft?: TEmbedDraft;
     // Opt-in timelapse: an H.264 frame per history step, in the draft if there is one.
     // getRecording() gives the MP4s. Browsers without an H.264 VideoEncoder don't record.
-    recording?: boolean;
+    // 'klr': an input recording instead (klr/klr-recorder.ts), from getKlr()/getKlrChunks().
+    recording?: boolean | 'klr';
+    // the URL of the picture the session starts from (the previous version's PSD), when it is
+    // not blank: a .klr names its start
+    klrStartUrl?: string;
+    // No images from outside Klecks: system-clipboard paste, drag and drop and image import
+    // are off, with a note; copy and paste inside Klecks go through an in-memory clipboard.
+    // Default: on with recording 'klr' (the recording holds no outside pixels), else off.
+    blockOutsideImages?: boolean;
 };
 
 export type TReadPSD = {
@@ -63,6 +92,7 @@ export class Embed {
     private fallbackProject: TKlEmbedProject | undefined; // if draft.saved can't be read
     private restoredDraft: TDraftRestored | undefined;
     private recording: EmbedRecording | undefined;
+    private klr: KlrRecorder | undefined;
 
     onProjectReady(embedProject: TKlEmbedProject) {
         if (this.isRestoringDraft) {
@@ -87,11 +117,24 @@ export class Embed {
                     url: this.p.embedUrl,
                     enableImageDropperImport: !!this.p.enableImageDropperImport,
                     disableUnloadWarning: !!this.p.draft, // the embedder warns
+                    blockOutsideImages: this.p.blockOutsideImages ?? this.p.recording === 'klr',
                     onSubmit: this.p.onSubmit,
                 },
             });
             const restoredVideo = this.restoredDraft?.video;
-            if (this.p.recording || restoredVideo?.clips.length) {
+            if (this.p.recording === 'klr') {
+                try {
+                    const api = this.klApp.getKlrApi();
+                    this.klr = new KlrRecorder({
+                        api,
+                        start: this.restoredDraft
+                            ? { kind: 'reference', url: this.p.klrStartUrl ?? '' } // phase 2
+                            : klrStartOf(embedProject, this.p.klrStartUrl),
+                    });
+                } catch (e) {
+                    console.error('Recording unavailable', e);
+                }
+            } else if (this.p.recording || restoredVideo?.clips.length) {
                 // Without the option (or an encoder) a draft's recording is only carried along.
                 try {
                     this.recording = new EmbedRecording({
@@ -197,6 +240,20 @@ export class Embed {
 
     getRecordingInfo(): TRecordingInfo | null {
         return this.recording ? this.recording.getInfo() : null;
+    }
+
+    // the whole .klr (seals the open chunk), or null without the 'klr' recording
+    getKlr(): Uint8Array | null {
+        return this.klr ? this.klr.getBytes() : null;
+    }
+
+    // head + sealed chunks + the open one, concatenated they are the .klr (for drafts)
+    getKlrChunks(): TKlrChunks | null {
+        return this.klr ? this.klr.getChunks() : null;
+    }
+
+    getKlrInfo(): TKlrInfo | null {
+        return this.klr ? this.klr.getInfo() : null;
     }
 
     readPSDs(psds: TReadPSD[]) {

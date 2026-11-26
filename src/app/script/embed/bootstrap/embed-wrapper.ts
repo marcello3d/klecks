@@ -17,8 +17,15 @@ let wrapperCreated = false;
  * Lazy loads rest of library, shows a loading screen, exposes Embed interface
  */
 export class EmbedWrapper {
-    // the `draft` option; the `recording` option and getRecording()
-    static readonly features = { draft: 1, recording: 1 };
+    // the `draft` option; the `recording` option and getRecording(); recording: 'klr',
+    // getKlr(), getKlrChunks(), loadKlrPlayer() and blockOutsideImages
+    static readonly features = { draft: 1, recording: 1, klr: 1 };
+
+    // The headless .klr player (its own chunk): new KlrPlayer(bytes).runAll()
+    static loadKlrPlayer = async () => {
+        await initLANG();
+        return (await import('../../klr/klr-player')).KlrPlayer;
+    };
 
     private project: TKlEmbedProject | undefined;
     private errorStr: string | undefined;
@@ -178,5 +185,21 @@ export class EmbedWrapper {
     // What the recorder is doing (state, codec, frames, bytes, grab times), or null.
     getRecordingInfo = () => {
         return this.embed ? this.embed.getRecordingInfo() : null;
+    };
+
+    // recording: 'klr'. The whole .klr (the open chunk sealed), or null.
+    getKlr = (): Uint8Array | null => {
+        return this.embed ? this.embed.getKlr() : null;
+    };
+
+    // recording: 'klr'. { head, sealed, open }: the bytes so far, without sealing; joined in
+    // that order they are a .klr. For drafts.
+    getKlrChunks = () => {
+        return this.embed ? this.embed.getKlrChunks() : null;
+    };
+
+    // recording: 'klr'. Ops, strokes, bytes, chunks, and catch-all uses (each one a bug).
+    getKlrInfo = () => {
+        return this.embed ? this.embed.getKlrInfo() : null;
     };
 }
