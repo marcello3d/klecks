@@ -251,18 +251,27 @@ for (const name of browsers) {
             const tail = JSON.parse(Buffer.from(f.tail, 'base64').toString('utf8'));
             const page = await open(context, '?idle');
             await page.evaluate((d) => importDraft(d), { format: f.format, tail: f.tail, pieces: f.pieces });
-            await page.goto(base + `?draft&w=${tail.width}&h=${tail.height}`);
+            // the tiles-1 reader, as 2draw opens these today (no recording: the composite is
+            // drawn as when the fixture was made; under 'klr' canvases are software ones and a
+            // half-opacity layer composites with other rounding)
+            await page.goto(base + `?draft&norec&w=${tail.width}&h=${tail.height}`);
             await page.evaluate(() => window.ready);
             await sleep(300);
             const diff = await page.evaluate((png) => pngDiff(png), f.expected);
             assert.deepEqual(diff, { differing: 0 }, dir);
             await draw(page, 2, { seed: 13 });
             await page.evaluate(() => flushDraft());
-            const st = await state(page);
-            assert.equal(st.format, 'klecks-tiles-2', dir + ' saves on as tiles-2');
-            const after = await hashes(page);
+            const st = await page.evaluate(() => draftState.tail?.format);
+            assert.equal(st, 'klecks-tiles-2', dir + ' saves on as tiles-2');
+            const after = await page.evaluate(() => pngBase64());
             await reload(page);
-            assert.deepEqual(await hashes(page), after, dir + ' reopens from tiles-2');
+            assert.deepEqual(await page.evaluate((p) => pngDiff(p), after), { differing: 0 }, dir + ' reopens from tiles-2');
+            // and under recording: 'klr' it opens too, with the same layers (tiles are exact)
+            await page.goto(base + `?draft&w=${tail.width}&h=${tail.height}`);
+            await page.evaluate(() => window.ready);
+            await sleep(300);
+            const layers = await page.evaluate(() => api.klCanvas.getLayerCount());
+            assert.equal(layers, tail.layers.length, dir + ' under klr');
             await page.close();
         }
         await context.close();
