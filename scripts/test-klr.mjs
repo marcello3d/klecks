@@ -140,7 +140,12 @@ async function drive(page) {
         // a sealed chunk (with its HASH) per group: a mismatch names the group, and the chunks
         // after it show they decode on their own
         const push = done.push.bind(done);
-        done.push = (name) => { if (!klecks.embed.klr.seal()) throw new Error('could not seal after ' + name); return push(name); };
+        const chunkNames = [];
+        done.push = (name) => {
+            if (klecks.embed.klr.seal()) chunkNames.push(name);
+            else if (klecks.getKlrChunks().open) throw new Error('could not seal after ' + name);
+            return DEBUG && name.includes('#') ? done.length : push(name);
+        };
         done.push('mouse strokes');
 
         // all brushes on layer 1, twice over with other settings
@@ -151,7 +156,7 @@ async function drive(page) {
         api.chainIn({ type: 'line', x0: 100, y0: 100, x1: 700.3, y1: 420.9, pressure0: 1, pressure1: 1 });
         await sleep(20);
         done.push('brushes');
-        if (UNTIL === 'brushes') return done;
+        if (UNTIL === 'brushes') return { done, chunkNames };
 
         // fills, shapes, gradient, text
         kc.floodFill(1, W * 0.5, H * 0.5, { r: 30, g: 140, b: 200 }, 1, 64, 'all', 1, true);
@@ -252,7 +257,7 @@ async function drive(page) {
         await strokesWith('smudgeBrush', 2);
         await strokesWith('penBrush', 2);
         await sleep(300);
-        return done;
+        return { done, chunkNames };
     }, { DEBUG: !!process.env.KLR_DEBUG, UNTIL: process.env.KLR_UNTIL });
 }
 
@@ -280,7 +285,7 @@ for (const name of browsers) {
         await mouseStrokes(page, 'penBrush', 4);
         await mouseStrokes(page, 'blendBrush', 3);
         await mouseStrokes(page, 'smudgeBrush', 2);
-        const done = await drive(page);
+        const { done, chunkNames } = await drive(page);
         const base64 = await page.evaluate(() => klrBase64());
         const info = await page.evaluate(() => klecks.getKlrInfo());
         const live = await page.evaluate(() => {
@@ -309,15 +314,17 @@ for (const name of browsers) {
         const brushes = new Set(ops.filter((o) => o.op === 'brush').map((o) => o.brush));
         assert.equal(brushes.size, process.env.KLR_UNTIL ? brushes.size : 7, 'all seven brushes');
 
+        // chunk index → the group (or stroke) that ended it; empty seals made no chunk
+        const groups = chunkNames;
         const fresh = await open(context, '?player');
         const replay = await fresh.evaluate((b) => window.replay(b), base64);
         await fresh.close();
         assert.equal(replay.startMismatch, false, 'start picture');
         if (replay.hashMismatches.length && process.env.KLR_DEBUG) {
             const c = replay.hashMismatches[0].chunk;
-            console.log('first mismatch in', done[c], JSON.stringify(file.chunks[c].ops.filter((o) => o.op !== 'move').slice(0, 40)));
+            console.log('first mismatch in', groups[c], JSON.stringify(file.chunks[c].ops.filter((o) => o.op !== 'move').slice(0, 40)));
         }
-        assert.deepEqual(replay.hashMismatches.map((m) => ({ ...m, group: done[m.chunk] })).slice(0, 5), [], 'chunk HASH mismatches');
+        assert.deepEqual(replay.hashMismatches.map((m) => ({ ...m, group: groups[m.chunk] })).slice(0, 5), [], 'chunk HASH mismatches');
         assert.deepEqual(replay.hashes, live, 'per-layer hashes, replay vs live');
         const sb = strokeBytes(file);
         return (
