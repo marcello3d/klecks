@@ -32,6 +32,8 @@ export class KlHistory {
     private changeCount: number = 0; // number keeps incrementing with each change (push, undo, redo)
     private pauseStack: number = 0; // how often paused without unpause. push does nothing when paused.
     private readonly listeners: TKlHistoryListener[] = []; // broadcasts on undo, redo, push
+    // 2draw: told synchronously about each push (the .klr recorder's catch-all)
+    private pushObserver: ((entry: THistoryEntryData, replaceTop: boolean) => void) | undefined;
 
     private broadcast(): void {
         this.changeCount++;
@@ -134,7 +136,12 @@ export class KlHistory {
         this.totalActions++;
         this.index = this.entries.length - 1;
         this.updateComposed();
+        this.pushObserver?.(entryData, !!replaceTop);
         this.broadcast();
+    }
+
+    setPushObserver(fn: ((entry: THistoryEntryData, replaceTop: boolean) => void) | undefined): void {
+        this.pushObserver = fn;
     }
 
     increaseIndex(): THistoryEntry {
