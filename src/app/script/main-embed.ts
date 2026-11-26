@@ -13,6 +13,7 @@ import { EmbedRecording, TRecordingInfo } from './embed/embed-recording';
 import { KlrRecorder, TKlrChunks, TKlrInfo } from './klr/klr-recorder';
 import { TKlrStart } from './klr/klr-format';
 import { isLayerFill } from './klecks/kl-types';
+import { softwareCanvases } from './klecks/canvas/layer-context';
 
 // a project of plain fills is a blank start the .klr describes itself
 function klrStartOf(project: TKlEmbedProject, url: string | undefined): TKlrStart {
@@ -175,6 +176,10 @@ export class Embed {
 
     // ----------------------------------- public -----------------------------------
     constructor(private p: TEmbedParams & { embedUrl: string }) {
+        if (p.recording === 'klr') {
+            // software canvases from the start, as the player has (layer-context.ts)
+            softwareCanvases();
+        }
         this.loadingScreenEl = document.getElementById('loading-screen');
         this.loadingScreenTextEl = document.getElementById('loading-screen-text');
         if (this.loadingScreenTextEl) {

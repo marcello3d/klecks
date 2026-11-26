@@ -38,6 +38,8 @@ import {
 } from './klr-brushes';
 import { pasteAsLayer, TKlrPasteParams } from './klr-paste';
 import { KlrHasher } from './klr-hash';
+import { sortLayerMap } from '../klecks/history/sort-layer-map';
+import { softwareCanvases } from '../klecks/canvas/layer-context';
 
 export type TKlrPlayerResult = {
     ops: number;
@@ -276,7 +278,23 @@ export class KlrPlayer {
     // RESTORE: the page reloaded and opened its draft, with a fresh history, fresh brushes, an
     // empty clipboard, from the picture as it was
     private restart(): void {
-        const project = this.klCanvas.getProject();
+        // as the draft holds it: the history's tiles and layer attributes (embed-draft.ts)
+        const composed = this.klHistory.getComposed();
+        const project: TKlProject = {
+            projectId: composed.projectId.value,
+            width: composed.size.width,
+            height: composed.size.height,
+            layers: Object.values(composed.layerMap)
+                .sort(sortLayerMap)
+                .map((layer) => ({
+                    name: layer.name,
+                    opacity: layer.opacity,
+                    isVisible: layer.isVisible,
+                    mixModeStr: layer.mixModeStr,
+                    hasClipping: layer.hasClipping,
+                    image: layer.tiles.slice(),
+                })),
+        };
         const klHistory = new KlHistory({ oldest: projectToComposed(project) });
         const klCanvas = new KlCanvas(klHistory, -1);
         this.klCanvas.destroy();
@@ -293,6 +311,8 @@ export class KlrPlayer {
     // ----------------------------------- public -----------------------------------
 
     constructor(bytes: Uint8Array, p: { project?: TKlProject } = {}) {
+        // software canvases, as the recording app had (layer-context.ts)
+        softwareCanvases();
         this.file = parseKlr(bytes);
         const project = p.project ?? blankStartProject(this.file.head);
         this.klHistory = new KlHistory({ oldest: projectToComposed(project) });

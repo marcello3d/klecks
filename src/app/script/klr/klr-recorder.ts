@@ -109,6 +109,8 @@ export class KlrRecorder implements TKlrHookTarget {
     // the open chunk up to its last op outside a stroke and outside an op: what a draft keeps
     private stableLength = 0;
     private stableOps = 0;
+    private pendingRestore: number[] | undefined;
+    private restoreTimer: ReturnType<typeof setTimeout> | undefined;
     private writer!: KlrOpsWriter;
     private chunkT0 = 0;
     private lastOpAt = 0;
@@ -143,7 +145,24 @@ export class KlrRecorder implements TKlrHookTarget {
         this.stableOps = 0;
     }
 
+    private flushRestore(): void {
+        if (!this.pendingRestore) {
+            return;
+        }
+        const early = this.pendingRestore;
+        this.pendingRestore = undefined;
+        clearTimeout(this.restoreTimer);
+        const hashes = this.hashLayers(false);
+        if (early.join() !== hashes.join()) {
+            console.warn('klr: the restored picture changed after the app started', early, hashes);
+        }
+        this.emit({ op: 'restore', hashes });
+    }
+
     private emit(op: TKlrOpInput): void {
+        if (this.pendingRestore) {
+            this.flushRestore();
+        }
         this.writer.write(op, this.now());
         this.ops++;
         this.lastOpAt = performance.now();
@@ -288,7 +307,11 @@ export class KlrRecorder implements TKlrHookTarget {
         this.newChunk();
         this.snapshotIds();
         if (p.restored) {
-            this.emit({ op: 'restore', hashes: this.hashLayers() });
+            // RESTORE goes first, with the picture as the page shows it once it settled: just
+            // after construction it can still differ (seen in Chrome), so it is written before
+            // the first op, the first draft save or seal, or after a moment, whichever is first
+            this.pendingRestore = this.hashLayers(false);
+            this.restoreTimer = setTimeout(() => this.flushRestore(), 300);
         }
 
         // every KlCanvas method that changes the picture, with its arguments
@@ -391,6 +414,7 @@ export class KlrRecorder implements TKlrHookTarget {
 
     /** Ends the open chunk with a HASH of every layer. Not while a stroke is going on. */
     seal(): boolean {
+        this.flushRestore();
         if (this.writer.opCount === 0 || !this.canSeal()) {
             return false;
         }
@@ -417,6 +441,7 @@ export class KlrRecorder implements TKlrHookTarget {
 
     /** For a draft: everything up to the last op between strokes, and how to continue. */
     getDraftState(): TKlrDraftState {
+        this.flushRestore();
         return {
             head: this.head,
             sealed: this.sealed.slice(),

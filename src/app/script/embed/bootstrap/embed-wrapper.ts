@@ -6,6 +6,7 @@ import { initLANG, LANG } from '../../language/language';
 import { THEME } from '../../theme/theme';
 import { loadAgPsd } from '../../klecks/storage/load-ag-psd';
 import { createImage } from '../../bb/base/ui';
+import { softwareCanvases } from '../../klecks/canvas/layer-context';
 
 // only one instance can exist
 let wrapperCreated = false;
@@ -23,6 +24,7 @@ export class EmbedWrapper {
 
     // The headless .klr player (its own chunk): new KlrPlayer(bytes).runAll()
     static loadKlrPlayer = async () => {
+        softwareCanvases(); // before the player's modules make any canvas
         await initLANG();
         return (await import('../../klr/klr-player')).KlrPlayer;
     };
@@ -39,6 +41,9 @@ export class EmbedWrapper {
             throw new Error('Already created an embed');
         }
         wrapperCreated = true;
+        if (p.recording === 'klr') {
+            softwareCanvases(); // before any of Klecks's canvases exist (layer-context.ts)
+        }
 
         const embedParams: TEmbedParams & { embedUrl: string } = {
             ...p,

@@ -185,9 +185,10 @@ for (const name of browsers) {
         await page.evaluate(() => { api.klCanvas.floodFill(1, 300, 300, { r: 10, g: 200, b: 90 }, 1, 30, 'current', 0, true); api.undo(); });
         await page.evaluate(() => flushDraft());
         const h1 = await hashes(page);
+        let part1;
         {
             // what the draft keeps replays to the checkpoint's picture
-            const part = await page.evaluate(() => klrDraftBase64());
+            const part = (part1 = await page.evaluate(() => klrDraftBase64()));
             const ctx = await browser.newContext();
             const r = await replayFresh(ctx, part);
             await ctx.close();
@@ -196,6 +197,13 @@ for (const name of browsers) {
         }
         await reload(page);
         assert.deepEqual(await hashes(page), h1, 'restored right after a checkpoint');
+        {
+            // the restored recording: the draft's, then RESTORE with the restored picture
+            const now = parseKlr(new Uint8Array(Buffer.from(await page.evaluate(() => klrDraftBase64()), 'base64')));
+            const before = parseKlr(new Uint8Array(Buffer.from(part1, 'base64')));
+            assert.deepEqual(now.chunks[0].ops, before.chunks[0].ops, 'chunk 0 kept as it was');
+            assert.deepEqual({ op: now.chunks[1].ops[0].op, hashes: now.chunks[1].ops[0].hashes }, { op: 'restore', hashes: h1 }, 'RESTORE holds the restored picture');
+        }
 
         // keep drawing, a checkpoint, more drawing that isn't saved, reload
         await draw(page, 12, { seed: 7 });

@@ -1,3 +1,4 @@
+import { layerContext } from './layer-context';
 import { HISTORY_TILE_SIZE } from '../history/kl-history';
 import { TKlCanvasLayer } from './kl-canvas';
 import { THistoryEntryDataComposed } from '../history/history.types';
@@ -27,7 +28,7 @@ export function updateLayersViaComposed(
             if (sizeDidChange || !composedBeforeLayer) {
                 // create new canvas
                 canvas = BB.canvas(after.size.width, after.size.height);
-                context = BB.ctx(canvas);
+                context = layerContext(canvas);
 
                 composedAfterLayer.tiles.forEach((item, index) => {
                     const x = index % tilesPerX;

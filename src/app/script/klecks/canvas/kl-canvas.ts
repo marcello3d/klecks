@@ -47,8 +47,10 @@ import { getBinaryMask } from '../select-tool/get-binary-mask';
 import { TIndexBounds } from '../../bb/bb-types';
 import { LayerCompositor } from './layer-compositor';
 import { getMixModeStr } from './get-mix-mode';
+import { layerContext } from './layer-context';
 
 export const MAX_LAYERS = 16;
+
 
 export type TKlCanvasLayer = {
     id: TLayerId;
@@ -360,7 +362,7 @@ export class KlCanvas {
         const index = selectedIndex === undefined ? this.layers.length : selectedIndex + 1;
 
         const canvas = BB.canvas(this.width, this.height);
-        const context = BB.ctx(canvas);
+        const context = layerContext(canvas);
         if (data) {
             if (typeof data.image === 'function') {
                 data.image(context);
@@ -426,7 +428,7 @@ export class KlCanvas {
         const srcComposed = composed.layerMap[srcLayer.id];
 
         const canvas = BB.canvas(this.width, this.height);
-        const ctx = BB.ctx(canvas);
+        const ctx = layerContext(canvas);
         const layerId = getNextLayerId();
         const newLayer: TKlCanvasLayer = {
             id: layerId,
