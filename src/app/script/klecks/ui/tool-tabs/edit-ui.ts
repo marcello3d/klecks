@@ -1,4 +1,5 @@
 import { getIconUrl } from '../../../icon/icon';
+import { klrFilter } from '../../../klr/klr-hooks';
 import { BB } from '../../../bb/bb';
 import { KL } from '../../kl';
 import { TKeyString } from '../../../bb/bb-types';
@@ -180,17 +181,7 @@ This has been reported to Google.
                     }
 
                     const applyFilter = (input: any) => {
-                        const filterResult = filters[filterKey].apply!({
-                            layer: this.klCanvas.getLayer(this.getCurrentLayerIndex()),
-                            klCanvas: this.klCanvas,
-                            klHistory: this.klHistory,
-                            input: input,
-                        } as TFilterApply);
-                        if (!filterResult) {
-                            showError("Couldn't apply the edit action");
-                        }
-                        filters[filterKey].updatePos && this.onCanvasChanged();
-                        this.layersUi.update();
+                        this.applyFilter(filterKey, input);
                     };
 
                     if (filters[filterKey].isInstant) {
@@ -372,6 +363,26 @@ This has been reported to Google.
     }
 
     // ----------------------------------- public -----------------------------------
+
+    /** Applies a filter to the current layer, as its dialog's Ok does (and the .klr records). */
+    applyFilter(filterKey: string, input: unknown): boolean {
+        const filters = KL.FILTER_LIB;
+        const layerIndex = this.getCurrentLayerIndex();
+        const filterResult = klrFilter(filterKey, layerIndex, input, () =>
+            filters[filterKey].apply!({
+                layer: this.klCanvas.getLayer(layerIndex),
+                klCanvas: this.klCanvas,
+                klHistory: this.klHistory,
+                input: input,
+            } as TFilterApply),
+        );
+        if (!filterResult) {
+            showError("Couldn't apply the edit action");
+        }
+        filters[filterKey].updatePos && this.onCanvasChanged();
+        this.layersUi.update();
+        return !!filterResult;
+    }
 
     constructor(p: TEditUiParams) {
         this.klRootEl = p.klRootEl;

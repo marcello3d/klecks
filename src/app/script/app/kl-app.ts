@@ -87,6 +87,41 @@ const toolSelectImg = getIconUrl('tool-select');
 const tabSettingsImg = getIconUrl('tab-settings');
 const tabLayersImg = getIconUrl('tab-layers');
 const tabEditImg = getIconUrl('tab-edit');
+import { klrChainOut, klrNextId, klrOp, klrSample, klrTransfer, klrTransform } from '../klr/klr-hooks';
+import { createSelectionSample } from '../klecks/transform/selection-sample';
+import { klCanvasTransform } from '../klecks/canvas/kl-canvas-transform';
+import { klCanvasFfd } from '../klecks/canvas/kl-canvas-ffd';
+import { FfdRenderer } from '../klecks/transform/ffd-renderer';
+import { TFreeTransform } from '../klecks/transform/transform-types';
+import { TFfdLattice } from '../klecks/transform/ffd';
+import type { TInterpolationAlgorithm } from '../klecks/kl-types';
+import { pasteAsLayer, TKlrPasteParams } from '../klr/klr-paste';
+import type { TKlrAppApi } from '../klr/klr-recorder';
+
+const OUTSIDE_IMAGES_NOTE = 'Only what you copied in Klecks can be pasted here.';
+
+export type TKlrApi = TKlrAppApi & {
+    chainIn: (e: Partial<TDrawEvent>) => void;
+    setBrush: (id: TBrushId) => void;
+    getBrushUi: () => any;
+    setColor: (c: { r: number; g: number; b: number }) => void;
+    selectLayer: (index: number) => void;
+    undo: () => void;
+    redo: () => void;
+    applyFilter: (name: string, input: unknown) => boolean;
+    copy: () => void;
+    paste: (params?: TKlrPasteParams) => void;
+    getRefusedImports: () => number;
+    transformSelection: (p: {
+        freeTransform?: TFreeTransform;
+        ffd?: TFfdLattice;
+        clone?: boolean;
+        targetLayerIndex?: number;
+        algorithm?: TInterpolationAlgorithm;
+    }) => boolean;
+};
+let ffdRenderer: FfdRenderer | undefined;
+
 importFilters();
 
 /**
@@ -129,6 +164,9 @@ type TKlAppOptionsEmbed = {
     url: string;
     enableImageDropperImport?: boolean; // default false
     disableUnloadWarning?: boolean; // default false
+    // 2draw: no images from outside Klecks (system clipboard, drag and drop); copy and paste
+    // stay, through an in-memory clipboard. Default false (upstream behaviour).
+    blockOutsideImages?: boolean;
     onSubmit: (onSuccess: () => void, onError: () => void) => void;
 };
 
@@ -191,6 +229,7 @@ export class KlApp {
     private readonly unloadWarningTrigger: UnloadWarningTrigger | undefined;
     private lastSavedHistoryIndex: number = 0;
     private readonly klHistory: KlHistory;
+    private readonly klrApi: TKlrApi;
 
     private updateLastSaved(): void {
         this.lastSavedHistoryIndex = this.klHistory.getTotalIndex();
@@ -434,7 +473,8 @@ export class KlApp {
             chainArr: [this.lineSanitizer as any, lineSmoothing as any],
         });
 
-        drawEventChain.setChainOut(((event: TDrawEvent) => {
+        // .klr recording: quantized and logged before the brush sees it (klr-hooks.ts)
+        drawEventChain.setChainOut(((chainEvent: TDrawEvent) => klrChainOut(chainEvent, (event) => {
             if (event.type === 'down') {
                 this.toolspace.style.pointerEvents = 'none';
                 currentBrushUi.startLine(event.x, event.y, event.pressure);
@@ -456,7 +496,7 @@ export class KlApp {
                 this.easelBrush.setLastDrawEvent({ x: event.x1, y: event.y1 });
                 this.easel.requestRender();
             }
-        }) as any);
+        })) as any);
 
         let textToolSettings = {
             size: 20,
@@ -521,6 +561,9 @@ export class KlApp {
                 // didn't do anything
                 return;
             }
+            if (result.type === 'undo') {
+                klrOp(() => ({ op: 'undo' }), () => {});
+            }
             propagateUndoRedoChanges(result.type, composedBefore);
             if (showMessage) {
                 this.statusOverlay.out(LANG('undo'), true);
@@ -533,6 +576,9 @@ export class KlApp {
             if (!result) {
                 // didn't do anything
                 return;
+            }
+            if (result.type === 'redo') {
+                klrOp(() => ({ op: 'redo' }), () => {});
             }
             propagateUndoRedoChanges(result.type, composedBefore);
             if (showMessage) {
@@ -643,7 +689,7 @@ export class KlApp {
         let isFirstTransform = true;
         this.easel = new Easel({
             onBeforeRender: () => {
-                currentBrushUi?.getBrush().transferToCanvas?.();
+                klrTransfer(() => currentBrushUi?.getBrush().transferToCanvas?.());
             },
             width: Math.max(0, this.uiWidth - this.toolWidth),
             height: this.uiHeight,
@@ -1631,23 +1677,29 @@ export class KlApp {
         });
 
         this.floatingLayerPreview = new FloatingLayerPreview();
+        const onLayerSelect = (layerIndex: number, pushHistory: boolean) => {
+            setCurrentLayer(layerIndex);
+
+            if (pushHistory) {
+                klrOp(
+                    () => ({ op: 'active', index: layerIndex }),
+                    () => {
+                        const topEntry = this.klHistory.getEntries().at(-1)!.data;
+                        const replaceTop = isHistoryEntryActiveLayerChange(topEntry);
+
+                        this.klHistory.push(
+                            {
+                                activeLayerId: this.klCanvas.getLayer(layerIndex).id,
+                            },
+                            replaceTop,
+                        );
+                    },
+                );
+            }
+        };
         this.layersUi = new KL.LayersUi({
             klCanvas: this.klCanvas,
-            onSelect: (layerIndex, pushHistory) => {
-                setCurrentLayer(layerIndex);
-
-                if (pushHistory) {
-                    const topEntry = this.klHistory.getEntries().at(-1)!.data;
-                    const replaceTop = isHistoryEntryActiveLayerChange(topEntry);
-
-                    this.klHistory.push(
-                        {
-                            activeLayerId: this.klCanvas.getLayer(layerIndex).id,
-                        },
-                        replaceTop,
-                    );
-                }
-            },
+            onSelect: onLayerSelect,
             parentEl: this.rootEl,
             floatingLayerPreview: this.floatingLayerPreview,
             applyUncommitted: () => applyUncommitted(),
@@ -1667,6 +1719,62 @@ export class KlApp {
         const toolspaceLayout = getToolspaceLayout(this.uiHeight);
         this.layerPreview.setIsVisible(toolspaceLayout.isLayerPreviewVisible);
         this.layerPreview.setIsSmall(toolspaceLayout.isLayerPreviewSmall);
+
+        // ---- in-app clipboard (blockOutsideImages): only what was drawn in Klecks gets pasted
+        const blockOutsideImages = !!this.embed?.blockOutsideImages;
+        let inAppClip: { id: number; canvas: HTMLCanvasElement } | undefined;
+        let refusedImports = 0;
+        const refuseOutsideImage = () => {
+            refusedImports++;
+            this.statusOverlay.out(OUTSIDE_IMAGES_NOTE, true);
+        };
+        const copyInApp = () => {
+            applyUncommitted();
+            const id = klrNextId() || (inAppClip?.id ?? 0) + 1;
+            const mask = !!this.klCanvas.getSelection();
+            klrOp(
+                () => ({ op: 'copy', id, mask }),
+                () => {
+                    inAppClip = { id, canvas: this.klCanvas.getCanvas(1, mask) };
+                },
+            );
+            this.statusOverlay.out(LANG('cropcopy-copied'), true);
+        };
+        const applyPaste = (clip: { id: number; canvas: HTMLCanvasElement }, params: TKlrPasteParams) => {
+            const index = klrOp(
+                () => ({ op: 'paste', id: clip.id, params }),
+                () => pasteAsLayer(this.klCanvas, clip.canvas, params),
+            );
+            setCurrentLayer(index);
+            this.layersUi.update(index);
+            this.easelProjectUpdater.update();
+        };
+        // without params: the "import as layer" dialog places it
+        const pasteInApp = (params?: TKlrPasteParams) => {
+            if (KL.DIALOG_COUNTER.get() > 0) {
+                return;
+            }
+            const clip = inAppClip;
+            if (!clip) {
+                refuseOutsideImage();
+                return;
+            }
+            applyUncommitted();
+            if (params) {
+                applyPaste(clip, params);
+                return;
+            }
+            KL.showImportAsLayerDialog({
+                target: this.rootEl,
+                klCanvas: this.klCanvas,
+                importImage: clip.canvas,
+                callback: (transform, isPixelated) => {
+                    if (transform) {
+                        applyPaste(clip, { transform, isPixelated: !!isPixelated });
+                    }
+                },
+            });
+        };
 
         const editUi = new KL.EditUi({
             klRootEl: this.rootEl,
@@ -1688,7 +1796,7 @@ export class KlApp {
                 applyUncommitted();
                 copyToClipboard(false, false);
             },
-            onPaste: () => importHandler.readClipboard(),
+            onPaste: () => (blockOutsideImages ? pasteInApp() : importHandler.readClipboard()),
         });
 
         const klHistoryExecutor = new KlHistoryExecutor({
@@ -1748,6 +1856,10 @@ export class KlApp {
         );
 
         const copyToClipboard = (showCrop: boolean = false, closeOnBlur: boolean = true) => {
+            if (blockOutsideImages) {
+                copyInApp();
+                return;
+            }
             KL.clipboardDialog(
                 this.rootEl,
                 (maskSelection) => {
@@ -2228,7 +2340,25 @@ export class KlApp {
             },
         );
 
-        if (!this.embed || this.embed.enableImageDropperImport) {
+        if (blockOutsideImages) {
+            const isOff = () => KL.DIALOG_COUNTER.get() > 0 || BB.isInputFocused(true);
+            window.document.addEventListener('paste', (e: ClipboardEvent) => {
+                if (isOff()) {
+                    return;
+                }
+                e.preventDefault();
+                pasteInApp();
+            });
+            window.document.addEventListener('dragover', (e: DragEvent) => {
+                e.preventDefault(); // or the browser opens the file
+            });
+            window.document.addEventListener('drop', (e: DragEvent) => {
+                e.preventDefault();
+                if (Array.from(e.dataTransfer?.types ?? []).some((t) => t === 'Files' || t.startsWith('text/uri'))) {
+                    refuseOutsideImage();
+                }
+            });
+        } else if (!this.embed || this.embed.enableImageDropperImport) {
             new KL.KlImageDropper({
                 target: document.body,
                 onDrop: (files, optionStr) => {
@@ -2330,6 +2460,79 @@ export class KlApp {
             });
         }
         this.saveReminder?.init();
+
+        this.klrApi = {
+            klCanvas: this.klCanvas,
+            klHistory: this.klHistory,
+            getBrushId: () => currentBrushId,
+            getBrush: () => currentBrushUi.getBrush(),
+            getLayerIndex: () => currentLayerIndex,
+            isDrawing: () => this.isDrawing(),
+            // the paths the UI takes, for drivers and tests
+            chainIn: (e) => drawEventChain.chainIn(e as any),
+            setBrush: (id) => brushTabRow.open(id),
+            getBrushUi: () => currentBrushUi,
+            setColor: (c) => brushSettingService.setColor(new BB.RGB(c.r, c.g, c.b)),
+            selectLayer: (index) => {
+                onLayerSelect(index, true);
+                this.layersUi.update(index);
+            },
+            undo: () => undo(),
+            redo: () => redo(),
+            applyFilter: (name, input) => editUi.applyFilter(name, input),
+            copy: () => copyInApp(),
+            paste: (params) => pasteInApp(params),
+            getRefusedImports: () => refusedImports,
+            // what the select tool does on "apply" (kl-app-select.ts), through the same hooks
+            transformSelection: (p) => {
+                applyUncommitted();
+                const layerIndex = currentLayerIndex;
+                const selectionSample = klrSample(layerIndex, () =>
+                    createSelectionSample(layerIndex, this.klCanvas),
+                );
+                if (!selectionSample) {
+                    return false;
+                }
+                const selection = this.klCanvas.getSelection();
+                if (p.ffd) {
+                    klrTransform(
+                        'ffd',
+                        {
+                            klCanvas: this.klCanvas,
+                            selectionSample,
+                            selection,
+                            ffd: p.ffd,
+                            eraseLayerIndex: p.clone ? undefined : layerIndex,
+                            targetLayerIndex: p.targetLayerIndex ?? layerIndex,
+                            algorithm: p.algorithm ?? 'smooth',
+                            ffdRenderer: (ffdRenderer ??= new FfdRenderer()),
+                        },
+                        klCanvasFfd,
+                    );
+                } else {
+                    klrTransform(
+                        'xform',
+                        {
+                            klCanvas: this.klCanvas,
+                            selectionSample,
+                            selection,
+                            freeTransform: p.freeTransform!,
+                            eraseLayerIndex: p.clone ? undefined : layerIndex,
+                            targetLayerIndex: p.targetLayerIndex ?? layerIndex,
+                            algorithm: p.algorithm ?? 'smooth',
+                        },
+                        klCanvasTransform,
+                    );
+                }
+                this.easelProjectUpdater.update();
+                return true;
+            },
+        };
+    }
+
+    // internals for the .klr recorder (klr/klr-recorder.ts) and its tests
+    getKlrApi(): TKlrApi {
+        return this.klrApi;
     }
 
     // -------- interface --------

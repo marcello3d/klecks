@@ -10,9 +10,10 @@ import { LANG } from '../language/language';
 import { KlHistory } from '../klecks/history/kl-history';
 import { boundsToRect, rectToBounds } from '../bb/math/math';
 import { TInterpolationAlgorithm } from '../klecks/kl-types';
-import { klCanvasTransform } from '../klecks/canvas/kl-canvas-transform';
+import { klCanvasTransform as klCanvasTransformRaw } from '../klecks/canvas/kl-canvas-transform';
+import { klrSample, klrTransform } from '../klr/klr-hooks';
 import { composedLayerHasTransparency } from '../klecks/utils/composed-layer-has-transparency';
-import { klCanvasFfd } from '../klecks/canvas/kl-canvas-ffd';
+import { klCanvasFfd as klCanvasFfdRaw } from '../klecks/canvas/kl-canvas-ffd';
 import {
     centerTransformation,
     flipTransformation,
@@ -32,6 +33,11 @@ import { createTransformationComposite } from '../klecks/transform/create-transf
 import { THistoryExecutionType } from '../klecks/history/kl-history-executor';
 import { createSelectionSample, TSelectionSample } from '../klecks/transform/selection-sample';
 import { getFfdBounds } from '../klecks/transform/ffd-utils';
+
+// .klr recording: the select tool's transforms are logged with their parameters (klr-hooks.ts)
+const klCanvasTransform = (p: Parameters<typeof klCanvasTransformRaw>[0]) =>
+    klrTransform('xform', p, klCanvasTransformRaw);
+const klCanvasFfd = (p: Parameters<typeof klCanvasFfdRaw>[0]) => klrTransform('ffd', p, klCanvasFfdRaw);
 
 export type TSelectTransformTempEntry = {
     type: 'select-transform';
@@ -418,7 +424,9 @@ export class KlAppSelect {
 
                     // avoid changing state while mode-change can be rejected
                     const layerIndex = this.getCurrentLayerIndex();
-                    const selectionSample = createSelectionSample(layerIndex, this.klCanvas);
+                    const selectionSample = klrSample(layerIndex, () =>
+                        createSelectionSample(layerIndex, this.klCanvas),
+                    );
                     if (!selectionSample) {
                         setTimeout(() => {
                             showError(LANG('select-transform-empty'));
