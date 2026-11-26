@@ -39,6 +39,7 @@ import {
 } from './klr-format';
 import { diffBrushSettings, readBrushSettings } from './klr-brushes';
 import { klrHooks, TKlrHookTarget } from './klr-hooks';
+import { KlrHasher } from './klr-hash';
 
 
 export type TKlrAppApi = {
@@ -56,6 +57,16 @@ export type TKlrChunks = {
     open: Uint8Array | null; // the OPS chunk being written, no HASH yet
 };
 
+// What a draft keeps of the recording (embed-draft.ts) to continue it after a reload
+export type TKlrDraftState = {
+    head: Uint8Array; // magic + HEAD chunk
+    sealed: Uint8Array[]; // OPS chunks, framed
+    open: Uint8Array | null; // the open chunk up to its last op between strokes, framed
+    elapsedMs: number; // since the recording started
+    seed: number;
+    id: number;
+};
+
 export type TKlrInfo = {
     chunks: number; // sealed
     ops: number;
@@ -63,9 +74,11 @@ export type TKlrInfo = {
     bytes: number; // head + sealed + open
     catchAll: number; // history entries stored as tiles: bugs
     unencodable: number; // ops whose arguments didn't encode (their entries went to the catch-all)
+    hashTilesRead: number; // tiles read back for hashes (only changed ones are)
 };
 
 // seal the open chunk in a quiet gap once one of these is reached
+// (the open chunk rides in a draft's tail, base64 in JSON, under 2draw's 512 kB tailMax)
 const SEAL_BYTES = 64 * 1024;
 const SEAL_OPS = 20000;
 const SEAL_AGE_MS = 60_000;
@@ -75,13 +88,6 @@ export function getBuildId(): string {
     return process.env.KLECKS_BUILD || 'dev';
 }
 
-export function layerHashes(klCanvas: KlCanvas): number[] {
-    const w = klCanvas.getWidth();
-    const h = klCanvas.getHeight();
-    return klCanvas
-        .getLayersReference()
-        .map((layer) => fnv1a(layer.context.getImageData(0, 0, w, h).data));
-}
 
 function tileToKlr(tile: THistoryEntryLayerTile | undefined): TKlrTile {
     if (!tile) {
@@ -96,9 +102,13 @@ function tileToKlr(tile: THistoryEntryLayerTile | undefined): TKlrTile {
 
 export class KlrRecorder implements TKlrHookTarget {
     private readonly api: TKlrAppApi;
-    private readonly head: Uint8Array;
+    private readonly head: Uint8Array; // magic + HEAD chunk
     private readonly sealed: Uint8Array[] = [];
-    private readonly t0 = performance.now();
+    private readonly t0: number;
+    private readonly hasher = new KlrHasher();
+    // the open chunk up to its last op outside a stroke and outside an op: what a draft keeps
+    private stableLength = 0;
+    private stableOps = 0;
     private writer!: KlrOpsWriter;
     private chunkT0 = 0;
     private lastOpAt = 0;
@@ -129,12 +139,26 @@ export class KlrRecorder implements TKlrHookTarget {
         this.brushCache.clear();
         this.lastBrushId = undefined;
         this.lastLayer = undefined;
+        this.stableLength = this.writer.length;
+        this.stableOps = 0;
     }
 
     private emit(op: TKlrOpInput): void {
         this.writer.write(op, this.now());
         this.ops++;
         this.lastOpAt = performance.now();
+        this.markStable();
+    }
+
+    private markStable(): void {
+        if (this.depth === 0 && !this.strokeActive) {
+            this.stableLength = this.writer.length;
+            this.stableOps = this.writer.opCount;
+        }
+    }
+
+    hashLayers(useCache = true): number[] {
+        return this.hasher.hash(this.api.klCanvas, this.api.klHistory, useCache);
     }
 
     private snapshotIds(): void {
@@ -165,6 +189,7 @@ export class KlrRecorder implements TKlrHookTarget {
             this.depth--;
             if (this.depth === 0) {
                 this.snapshotIds();
+                this.markStable();
             }
         }
     }
@@ -228,20 +253,43 @@ export class KlrRecorder implements TKlrHookTarget {
 
     // ----------------------------------- public -----------------------------------
 
-    constructor(p: { api: TKlrAppApi; start: TKlrStart; build?: string }) {
+    /**
+     * start: a new recording. restored: the recording a draft kept (embed-draft.ts), continued:
+     * its chunks stay as they are (the open one closes without a HASH) and the new chunk starts
+     * with RESTORE, as the page starts over from the draft's tiles with a fresh history.
+     */
+    constructor(p: { api: TKlrAppApi; start: TKlrStart; build?: string; restored?: TKlrDraftState }) {
         this.api = p.api;
         const klCanvas = p.api.klCanvas;
-        this.head = encodeHead({
-            formatVersion: KLR_FORMAT_VERSION,
-            engineV: KLR_ENGINE_V,
-            build: p.build ?? getBuildId(),
-            width: klCanvas.getWidth(),
-            height: klCanvas.getHeight(),
-            start: p.start,
-            startHashes: layerHashes(klCanvas),
-        });
+        if (p.restored) {
+            this.head = p.restored.head;
+            this.sealed.push(...p.restored.sealed, ...(p.restored.open ? [p.restored.open] : []));
+            this.t0 = performance.now() - p.restored.elapsedMs;
+            this.seed = p.restored.seed;
+            this.id = p.restored.id;
+        } else {
+            this.t0 = performance.now();
+            this.head = concatBytes([
+                KLR_MAGIC,
+                encodeChunk(
+                    1,
+                    encodeHead({
+                        formatVersion: KLR_FORMAT_VERSION,
+                        engineV: KLR_ENGINE_V,
+                        build: p.build ?? getBuildId(),
+                        width: klCanvas.getWidth(),
+                        height: klCanvas.getHeight(),
+                        start: p.start,
+                        startHashes: this.hasher.hash(klCanvas, p.api.klHistory),
+                    }),
+                ),
+            ]);
+        }
         this.newChunk();
         this.snapshotIds();
+        if (p.restored) {
+            this.emit({ op: 'restore', hashes: this.hashLayers() });
+        }
 
         // every KlCanvas method that changes the picture, with its arguments
         for (const method of CANVAS_METHODS) {
@@ -304,8 +352,8 @@ export class KlrRecorder implements TKlrHookTarget {
             const seed = this.nextSeed();
             klRandomSeed(seed);
             if (q.type === 'down') {
+                this.strokeActive = true; // first: a draft never keeps half a stroke
                 this.emit({ op: 'down', x: q.x, y: q.y, p: q.pressure, seed });
-                this.strokeActive = true;
             } else {
                 const fromLast = q.x0 === null || q.y0 === null;
                 this.emit({ op: 'line', x0: fromLast ? null : q.x0, y0: fromLast ? null : q.y0, x1: q.x1, y1: q.y1, seed });
@@ -315,7 +363,7 @@ export class KlrRecorder implements TKlrHookTarget {
             this.emit({ op: 'move', x: q.x, y: q.y, p: q.pressure });
         } else {
             this.emit({ op: 'up' });
-            this.strokeActive = false;
+            this.strokeActive = false; // stable once the brush has pushed (run, below)
         }
         this.run(() => fn(q));
     }
@@ -346,7 +394,7 @@ export class KlrRecorder implements TKlrHookTarget {
         if (this.writer.opCount === 0 || !this.canSeal()) {
             return false;
         }
-        this.emit({ op: 'hash', hashes: layerHashes(this.api.klCanvas) });
+        this.emit({ op: 'hash', hashes: this.hashLayers() });
         this.sealed.push(encodeChunk(CHUNK_OPS, this.writer.bytes()));
         this.newChunk();
         return true;
@@ -354,7 +402,7 @@ export class KlrRecorder implements TKlrHookTarget {
 
     getChunks(): TKlrChunks {
         return {
-            head: concatBytes([KLR_MAGIC, encodeChunk(1, this.head)]),
+            head: this.head,
             sealed: this.sealed.slice(),
             open: this.writer.opCount ? encodeChunk(CHUNK_OPS, this.writer.bytes()) : null,
         };
@@ -367,6 +415,20 @@ export class KlrRecorder implements TKlrHookTarget {
         return concatBytes([c.head, ...c.sealed, ...(c.open ? [c.open] : [])]);
     }
 
+    /** For a draft: everything up to the last op between strokes, and how to continue. */
+    getDraftState(): TKlrDraftState {
+        return {
+            head: this.head,
+            sealed: this.sealed.slice(),
+            open: this.stableOps
+                ? encodeChunk(CHUNK_OPS, this.writer.bytes().slice(0, this.stableLength))
+                : null,
+            elapsedMs: performance.now() - this.t0,
+            seed: this.seed,
+            id: this.id,
+        };
+    }
+
     getInfo(): TKlrInfo {
         const c = this.getChunks();
         return {
@@ -376,6 +438,7 @@ export class KlrRecorder implements TKlrHookTarget {
             bytes: c.head.length + c.sealed.reduce((n, b) => n + b.length, 0) + (c.open?.length ?? 0),
             catchAll: this.catchAll,
             unencodable: this.unencodable,
+            hashTilesRead: this.hasher.tilesRead,
         };
     }
 

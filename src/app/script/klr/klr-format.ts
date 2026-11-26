@@ -15,6 +15,10 @@
  *             coordinate deltas start at 0, the first stroke of each brush restates all its
  *             settings and the first stroke restates the layer. A sealed chunk ends with HASH.
  *
+ * Layer hash (HASH, RESTORE, the HEAD's start): FNV-1a 32 over the FNV-1a 32 of each 256 px
+ * tile's RGBA (row-major, each tile hash as 4 bytes big-endian), so a seal reads back only
+ * the tiles that changed (klr-hash.ts).
+ *
  * Coordinates are 1/32 px (zigzag varint deltas from the previous point of the chunk),
  * pressure is u8. Other arguments use a small tagged value coding (writeValue). There is no
  * blob chunk: the recording never holds an image from outside Klecks (the catch-all TILES op
@@ -253,7 +257,7 @@ export const CHUNK_OPS = 2;
 
 export const COORD_SCALE = 32;
 
-// Opcodes. Append only.
+// Opcodes. Not frozen yet: nothing has been recorded with .klr, so they may still change.
 export const OP = {
     DOWN: 0x01,
     MOVE: 0x02,
@@ -272,6 +276,7 @@ export const OP = {
     FFD: 0x46, // select tool warp applied
     COPY: 0x47, // in-app copy into the in-memory clipboard
     PASTE: 0x48, // in-app paste as a new layer
+    RESTORE: 0x49, // the page reloaded and opened its draft: fresh history and brushes from here
     TILES: 0x7e, // catch-all: a history entry with no opcode, as tiles (a bug to fix)
     HASH: 0x7f, // FNV-1a 32 per layer
 } as const;
@@ -517,7 +522,9 @@ export type TKlrOp =
     | { op: 'copy'; t: number; id: number; mask: boolean }
     | { op: 'paste'; t: number; id: number; params: TKlrValue }
     | { op: 'tiles'; t: number; tiles: TKlrTiles }
-    | { op: 'hash'; t: number; hashes: number[] };
+    | { op: 'hash'; t: number; hashes: number[] }
+    // the picture the draft restored (layer hashes), from which a fresh undo history starts
+    | { op: 'restore'; t: number; hashes: number[] };
 
 // An op as the recorder hands it over: the writer adds the time.
 export type TKlrOpInput = TKlrOp extends infer O
@@ -621,12 +628,54 @@ function readTiles(r: ByteReader): TKlrTiles {
     return out;
 }
 
+/**
+ * The seam for stroke samples (points and pressure): every DOWN, MOVE and LINE sample goes
+ * through one of these, per chunk, and nothing else knows how they are coded. Today: 1/32 px
+ * zigzag varint deltas from the previous point and a u8 pressure, inline. Next: the range
+ * coder shared with Lascaux Pocket (lsp-format-next.ts), swapped in here. The format is not
+ * frozen yet (nothing has been recorded with it), so no reader for this coding is kept.
+ */
+export class KlrSampleCoder {
+    private lastX = 0; // 1/32 px
+    private lastY = 0;
+
+    point(w: ByteWriter, x: number, y: number): void {
+        const qx = Math.round(x * COORD_SCALE);
+        const qy = Math.round(y * COORD_SCALE);
+        w.svarint(qx - this.lastX);
+        w.svarint(qy - this.lastY);
+        this.lastX = qx;
+        this.lastY = qy;
+    }
+
+    pressure(w: ByteWriter, p: number): void {
+        w.u8(Math.round(Math.max(0, Math.min(1, p)) * 255));
+    }
+
+    readPoint(r: ByteReader): [number, number] {
+        this.lastX += r.svarint();
+        this.lastY += r.svarint();
+        return [this.lastX / COORD_SCALE, this.lastY / COORD_SCALE];
+    }
+
+    readPressure(r: ByteReader): number {
+        return r.u8() / 255;
+    }
+
+    save(): unknown {
+        return [this.lastX, this.lastY];
+    }
+
+    restore(state: unknown): void {
+        [this.lastX, this.lastY] = state as [number, number];
+    }
+}
+
 /** Writes one OPS chunk's payload. A new writer per chunk: deltas and clock start over. */
 export class KlrOpsWriter {
     private readonly w = new ByteWriter(4096);
     private lastT = 0;
-    private lastX = 0; // 1/32 px
-    private lastY = 0;
+    private readonly samples = new KlrSampleCoder();
     opCount = 0;
 
     constructor(startMs: number) {
@@ -638,25 +687,22 @@ export class KlrOpsWriter {
     }
 
     private point(x: number, y: number): void {
-        const qx = Math.round(x * COORD_SCALE);
-        const qy = Math.round(y * COORD_SCALE);
-        this.w.svarint(qx - this.lastX);
-        this.w.svarint(qy - this.lastY);
-        this.lastX = qx;
-        this.lastY = qy;
+        this.samples.point(this.w, x, y);
     }
 
     private pressure(p: number): void {
-        this.w.u8(Math.round(Math.max(0, Math.min(1, p)) * 255));
+        this.samples.pressure(this.w, p);
     }
 
     /** t: ms since the chunk started; never goes back. Writes nothing if it throws. */
     write(op: TKlrOpInput, t: number): void {
-        const saved = [this.w.length, this.lastT, this.lastX, this.lastY, this.opCount];
+        const saved = [this.w.length, this.lastT, this.opCount] as const;
+        const samples = this.samples.save();
         try {
             this.writeOp(op, t);
         } catch (e) {
-            [this.w.length, this.lastT, this.lastX, this.lastY, this.opCount] = saved;
+            [this.w.length, this.lastT, this.opCount] = saved;
+            this.samples.restore(samples);
             throw e;
         }
     }
@@ -758,8 +804,9 @@ export class KlrOpsWriter {
                 head(OP.TILES);
                 writeTiles(w, op.tiles);
                 return;
+            case 'restore':
             case 'hash':
-                head(OP.HASH);
+                head(op.op === 'hash' ? OP.HASH : OP.RESTORE);
                 w.varint(op.hashes.length);
                 op.hashes.forEach((h) => w.u32(h));
                 return;
@@ -779,14 +826,9 @@ export function decodeOps(payload: Uint8Array): TKlrOpsChunk {
     const startMs = r.varint();
     const ops: TKlrOp[] = [];
     let t = 0;
-    let x = 0;
-    let y = 0;
-    const point = (): [number, number] => {
-        x += r.svarint();
-        y += r.svarint();
-        return [x / COORD_SCALE, y / COORD_SCALE];
-    };
-    const pressure = () => r.u8() / 255;
+    const samples = new KlrSampleCoder();
+    const point = (): [number, number] => samples.readPoint(r);
+    const pressure = () => samples.readPressure(r);
     while (r.remaining > 0) {
         const code = r.u8();
         t += r.varint();
@@ -884,13 +926,14 @@ export function decodeOps(payload: Uint8Array): TKlrOpsChunk {
             case OP.TILES:
                 ops.push({ op: 'tiles', t, tiles: readTiles(r) });
                 break;
+            case OP.RESTORE:
             case OP.HASH: {
                 const n = r.varint();
                 const hashes: number[] = [];
                 for (let i = 0; i < n; i++) {
                     hashes.push(r.u32());
                 }
-                ops.push({ op: 'hash', t, hashes });
+                ops.push({ op: code === OP.HASH ? 'hash' : 'restore', t, hashes });
                 break;
             }
             default:

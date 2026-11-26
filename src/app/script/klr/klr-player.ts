@@ -37,7 +37,7 @@ import {
     TKlrBrush,
 } from './klr-brushes';
 import { pasteAsLayer, TKlrPasteParams } from './klr-paste';
-import { layerHashes } from './klr-recorder';
+import { KlrHasher } from './klr-hash';
 
 export type TKlrPlayerResult = {
     ops: number;
@@ -69,8 +69,9 @@ export function blankStartProject(head: TKlrHead): TKlProject {
 
 export class KlrPlayer {
     private readonly file: TKlrFile;
-    private readonly klHistory: KlHistory;
-    private readonly klCanvas: KlCanvas;
+    private klHistory: KlHistory;
+    private klCanvas: KlCanvas;
+    private readonly hasher = new KlrHasher();
     private readonly brushes = new Map<TKlrBrushId, TKlrBrush>();
     private brushId: TKlrBrushId = 'penBrush';
     private brushLayer = 0;
@@ -254,18 +255,39 @@ export class KlrPlayer {
             case 'tiles':
                 this.applyTiles(op.tiles);
                 return;
+            case 'restore':
             case 'hash': {
                 this.result.hashChecks++;
-                const now = layerHashes(kc);
+                const now = this.getLayerHashes();
                 const differ = now
                     .map((h, i) => (h === op.hashes[i] ? -1 : i))
                     .filter((i) => i >= 0);
                 if (differ.length || now.length !== op.hashes.length) {
                     this.result.hashMismatches.push({ chunk: this.chunkIndex, layers: differ });
                 }
+                if (op.op === 'restore') {
+                    this.restart();
+                }
                 return;
             }
         }
+    }
+
+    // RESTORE: the page reloaded and opened its draft, with a fresh history, fresh brushes, an
+    // empty clipboard, from the picture as it was
+    private restart(): void {
+        const project = this.klCanvas.getProject();
+        const klHistory = new KlHistory({ oldest: projectToComposed(project) });
+        const klCanvas = new KlCanvas(klHistory, -1);
+        this.klCanvas.destroy();
+        this.klHistory = klHistory;
+        this.klCanvas = klCanvas;
+        this.brushes.clear();
+        this.samples.clear();
+        this.clips.clear();
+        this.ffdRenderer = undefined;
+        this.brushId = 'penBrush';
+        this.brushLayer = 0;
     }
 
     // ----------------------------------- public -----------------------------------
@@ -275,7 +297,7 @@ export class KlrPlayer {
         const project = p.project ?? blankStartProject(this.file.head);
         this.klHistory = new KlHistory({ oldest: projectToComposed(project) });
         this.klCanvas = new KlCanvas(this.klHistory, -1);
-        const start = layerHashes(this.klCanvas);
+        const start = this.getLayerHashes();
         this.result.startMismatch =
             start.length !== this.file.head.startHashes.length ||
             start.some((h, i) => h !== this.file.head.startHashes[i]);
@@ -321,7 +343,7 @@ export class KlrPlayer {
         return { ...this.result, hashMismatches: this.result.hashMismatches.slice() };
     }
 
-    getLayerHashes(): number[] {
-        return layerHashes(this.klCanvas);
+    getLayerHashes(useCache = true): number[] {
+        return this.hasher.hash(this.klCanvas, this.klHistory, useCache);
     }
 }

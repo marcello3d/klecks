@@ -111,6 +111,7 @@ function sampleOps() {
             ],
         },
     });
+    ops.push({ op: 'restore', hashes: [7, 8, 9] });
     ops.push({ op: 'hash', hashes: [1, 0xfffffffe] });
     return ops;
 }
