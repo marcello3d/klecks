@@ -1,33 +1,41 @@
 /**
- * `.klr`: Klecks input recording, the binary coder. Pure (no DOM, only type imports), so
- * `node --test scripts/test-klr-unit.mjs` runs it as is. Built on Lascaux's .lsa v3 primitives
- * (LEB128 varints, zigzag deltas; the byte writer below is theirs). Design: worker/KLECKS-RECORDING-PLAN.md in
- * 2draw.net; docs/2draw-klr.md here.
+ * `.klr` v0: Klecks input recording, the coder. Pure (no DOM, no runtime imports but the
+ * vendored pen coder), so `node --test scripts/test-klr-unit.mjs` runs it as is.
+ *
+ * The spec is 2draw.net's worker/src/pocket/PEN-CODER.md, section 8 ("`.klr` v0 on the pen
+ * coder"); docs/2draw-klr.md here says how it is built and where it deviates. In short:
  *
  *   magic  89 4B 4C 52                       ("\x89KLR")
- *   chunk* u8 type | varint length | payload
+ *   chunk* u8 type | varint length | payload  unknown types are skipped
  *
- *   HEAD (1)  varint format version, varint engineV, string build, varint width, height,
- *             u8 start kind (0 blank: value-coded layer list; 1 reference: string URL),
- *             varint layer count, u32 FNV-1a per layer at the start
- *   OPS  (2)  varint start ms (since the recording started), then ops until the payload ends:
- *             u8 opcode | varint dt ms | arguments. Self-contained: the clock starts at 0, the
- *             coordinate deltas start at 0, the first stroke of each brush restates all its
- *             settings and the first stroke restates the layer. A sealed chunk ends with HASH.
+ *   HEAD  (1)  plain: headV 0, build, width, height, hashTile 256, start (blank: its layers;
+ *              reference: the previous version's PSD, which 2draw hands the player), start hashes
+ *   OPS   (2)  a plain header (opsV 0, engineV, coder 0, pen flags, klrFlags 0, startMs,
+ *              durationMs, opCount, restore + its hashes, the hashes at the seal), then one
+ *              range-coded op stream (pen-coder.ts) over CHANNELS, ending with END
+ *   TILES (3)  plain: the pixels of the catch-all TILES ops of the OPS chunk before it
  *
- * Layer hash (HASH, RESTORE, the HEAD's start): FNV-1a 32 over the FNV-1a 32 of each 256 px
- * tile's RGBA (row-major, each tile hash as 4 bytes big-endian), so a seal reads back only
- * the tiles that changed (klr-hash.ts).
- *
- * Coordinates are 1/32 px (zigzag varint deltas from the previous point of the chunk),
- * pressure is u8. Other arguments use a small tagged value coding (writeValue). There is no
- * blob chunk: the recording never holds an image from outside Klecks (the catch-all TILES op
- * holds tiles Klecks drew itself, and counts as a bug).
+ * Each OPS chunk decodes on its own. Strokes are one op (DOWN to UP) whose samples go through
+ * the shared pen coder (KlrSampleCoder, the one seam for them). Hot ops have typed fields;
+ * the rest carry named, self-describing values (writeValue) that the player maps to calls.
  */
+import {
+    channelTable,
+    CODER_RANGE,
+    newSink,
+    newSource,
+    PEN_FLAGS,
+    penChannelSpec,
+    penStrokeChannels,
+    PenStrokeDecoder,
+    PenStrokeEncoder,
+    VarintSink,
+} from './pen-coder.ts';
+import type { Channel, PenGrid, Sink, Source } from './pen-coder.ts';
 
-// ---------------------------------------------------------------- bytes
-// ByteWriter / ByteReader / concatBytes: copied from Lascaux's animation format
-// (web/src/anim/bytes.ts, .lsa v3), plus f32; no dependency across repositories.
+export type { PenGrid } from './pen-coder.ts';
+
+// ---------------------------------------------------------------- bytes (the plain parts)
 
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8');
@@ -58,6 +66,7 @@ export class ByteWriter {
         this.buf[this.length++] = v & 0xff;
     }
 
+    /** big-endian */
     u32(v: number): void {
         this.ensure(4);
         const b = this.buf;
@@ -69,7 +78,7 @@ export class ByteWriter {
         this.length = o;
     }
 
-    /** Unsigned LEB128 (any non-negative integer up to 2^53). */
+    /** Unsigned LEB128 (any non-negative safe integer). */
     varint(v: number): void {
         if (!(v >= 0) || !Number.isSafeInteger(v)) {
             throw new Error(`varint out of range: ${v}`);
@@ -81,17 +90,7 @@ export class ByteWriter {
         this.u8(v);
     }
 
-    /** Zigzag signed LEB128. */
-    svarint(v: number): void {
-        this.varint(v < 0 ? -2 * v - 1 : 2 * v);
-    }
-
-    f32(v: number): void {
-        this.ensure(4);
-        new DataView(this.buf.buffer, this.buf.byteOffset + this.length, 4).setFloat32(0, v);
-        this.length += 4;
-    }
-
+    /** big-endian IEEE double */
     f64(v: number): void {
         this.ensure(8);
         new DataView(this.buf.buffer, this.buf.byteOffset + this.length, 8).setFloat64(0, v);
@@ -115,27 +114,6 @@ export class ByteWriter {
         this.blob(utf8Encoder.encode(s));
     }
 
-    /** Big-endian ARGB pixels. */
-    pixels(p: Int32Array | ArrayLike<number>): void {
-        const n = p.length;
-        this.ensure(n * 4);
-        const b = this.buf;
-        let o = this.length;
-        for (let i = 0; i < n; i++) {
-            const c = p[i];
-            b[o++] = c >>> 24;
-            b[o++] = c >>> 16;
-            b[o++] = c >>> 8;
-            b[o++] = c;
-        }
-        this.length = o;
-    }
-
-    /** A view of the bytes written so far (invalidated by further writes). */
-    view(): Uint8Array {
-        return this.buf.subarray(0, this.length);
-    }
-
     toBytes(): Uint8Array {
         return this.buf.slice(0, this.length);
     }
@@ -156,7 +134,7 @@ export class ByteReader {
 
     private need(n: number): void {
         if (this.pos + n > this.b.length) {
-            throw new Error('truncated data');
+            throw new Error('klr: truncated');
         }
     }
 
@@ -184,19 +162,7 @@ export class ByteReader {
             }
             scale *= 128;
         }
-        throw new Error('varint too long');
-    }
-
-    svarint(): number {
-        const v = this.varint();
-        return v % 2 === 1 ? -(v + 1) / 2 : v / 2;
-    }
-
-    f32(): number {
-        this.need(4);
-        const v = new DataView(this.b.buffer, this.b.byteOffset + this.pos, 4).getFloat32(0);
-        this.pos += 4;
-        return v;
+        throw new Error('klr: varint too long');
     }
 
     f64(): number {
@@ -220,18 +186,6 @@ export class ByteReader {
     string(): string {
         return utf8Decoder.decode(this.blob());
     }
-
-    pixels(n: number): Int32Array {
-        this.need(n * 4);
-        const out = new Int32Array(n);
-        const b = this.b;
-        let o = this.pos;
-        for (let i = 0; i < n; i++, o += 4) {
-            out[i] = (b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3];
-        }
-        this.pos = o;
-        return out;
-    }
 }
 
 export function concatBytes(parts: Uint8Array[]): Uint8Array {
@@ -244,57 +198,68 @@ export function concatBytes(parts: Uint8Array[]): Uint8Array {
     return out;
 }
 
-// ---------------------------------------------------------------- format
+// ---------------------------------------------------------------- versions and tables
 
 export const KLR_MAGIC = Uint8Array.of(0x89, 0x4b, 0x4c, 0x52);
-export const KLR_FORMAT_VERSION = 1;
+/** HEAD's version. v0 is provisional (beta only, may be deleted); v1 is frozen. */
+export const KLR_HEAD_V = 0;
+/** OPS chunks' version: the opcodes, channels and value coding below. */
+export const KLR_OPS_V = 0;
 // What the replaying engine must do the same way. Bump with a change that would make old
 // recordings replay differently, and keep the old behaviour behind `engineV` checks.
 export const KLR_ENGINE_V = 1;
+/** The only coder .klr accepts (the pen coder's range coder). */
+export const KLR_CODER = CODER_RANGE;
+export const KLR_PEN_FLAGS = PEN_FLAGS;
+/** .klr's own per-chunk flags: none yet. A reader refuses bits it doesn't know. */
+export const KLR_FLAGS_KNOWN = 0;
+/** The tile size of every layer hash. */
+export const KLR_HASH_TILE = 256;
 
 export const CHUNK_HEAD = 1;
 export const CHUNK_OPS = 2;
+export const CHUNK_TILES = 3;
 
 export const COORD_SCALE = 32;
 
-// Opcodes. Not frozen yet: nothing has been recorded with .klr, so they may still change.
-export const OP = {
-    DOWN: 0x01,
-    MOVE: 0x02,
-    UP: 0x03,
-    LINE: 0x04,
-    TRANSFER: 0x05, // the easel's per-frame transferToCanvas
-    BRUSH: 0x10, // brush id + changed settings
-    LAYER: 0x11, // the layer strokes go to
-    CANVAS: 0x20, // 0x20 + index into CANVAS_METHODS
-    FILTER: 0x40,
-    UNDO: 0x41,
-    REDO: 0x42,
-    ACTIVE: 0x43, // active layer pushed to the history (layer list click)
-    SAMPLE: 0x44, // selection sample taken for a transform
-    XFORM: 0x45, // select tool free transform applied
-    FFD: 0x46, // select tool warp applied
-    COPY: 0x47, // in-app copy into the in-memory clipboard
-    PASTE: 0x48, // in-app paste as a new layer
-    RESTORE: 0x49, // the page reloaded and opened its draft: fresh history and brushes from here
-    TILES: 0x7e, // catch-all: a history entry with no opcode, as tiles (a bug to fix)
-    HASH: 0x7f, // FNV-1a 32 per layer
+/** Opcodes. Flat and append only; a changed field list is a new opcode. */
+export const OPC = {
+    END: 0,
+    STROKE: 1,
+    LINE: 2,
+    BRUSH: 3,
+    LAYER: 4,
+    ACTIVE: 5,
+    UNDO: 6,
+    REDO: 7,
+    COPY: 8,
+    PASTE: 9,
+    SAMPLE: 10,
+    XFORM: 11,
+    FFD: 12,
+    FILTER: 13,
+    TILES: 14,
+    EXT: 15,
 } as const;
 
-// KlCanvas methods recorded with their arguments. Append only (the index is the opcode).
-export const CANVAS_METHODS = [
-    'reset',
-    'resize',
-    'cropExtend',
-    'addLayer',
-    'duplicateLayer',
-    'removeLayer',
-    'renameLayer',
+/** KlCanvas methods with typed fields, opcodes 16-24. */
+export const SCALAR_METHODS = [
     'setOpacity',
     'setLayerIsVisible',
     'setLayerHasClipping',
     'moveLayer',
     'mergeLayer',
+    'removeLayer',
+    'duplicateLayer',
+    'renameLayer',
+    'setMixMode',
+] as const;
+/** KlCanvas methods with named fields, opcodes 25-38. */
+export const NAMED_METHODS = [
+    'addLayer',
+    'reset',
+    'resize',
+    'cropExtend',
     'mergeAll',
     'rotate',
     'flip',
@@ -304,12 +269,70 @@ export const CANVAS_METHODS = [
     'drawGradient',
     'text',
     'eraseLayer',
-    'setMixMode',
     'setSelection',
 ] as const;
+export const OPC_SCALAR = 16;
+export const OPC_NAMED = 25;
+/** Every recorded KlCanvas method (the recorder wraps them). */
+export const CANVAS_METHODS = [...SCALAR_METHODS, ...NAMED_METHODS] as const;
 export type TKlrCanvasMethod = (typeof CANVAS_METHODS)[number];
 
-// Brushes by u8 index. Append only.
+/** Each method's parameters by their names in KlCanvas's signature, in order: the named fields. */
+export const CANVAS_PARAMS: Record<TKlrCanvasMethod, readonly string[]> = {
+    setOpacity: ['layerIndex', 'opacity'],
+    setLayerIsVisible: ['layerIndex', 'isVisible'],
+    setLayerHasClipping: ['layerIndex', 'hasClipping'],
+    moveLayer: ['index', 'delta'],
+    mergeLayer: ['layerIndex', 'mixModeStr'],
+    removeLayer: ['index'],
+    duplicateLayer: ['srcIndex'],
+    renameLayer: ['index', 'name'],
+    setMixMode: ['layerIndex', 'mixModeStr'],
+    addLayer: ['selectedIndex', 'data'],
+    reset: ['p'],
+    resize: ['w', 'h', 'algorithm'],
+    cropExtend: ['p'],
+    mergeAll: [],
+    rotate: ['deg'],
+    flip: ['isHorizontal', 'isVertical', 'layerIndex'],
+    layerFill: ['layerIndex', 'colorObj', 'compositeOperation', 'doClipSelection'],
+    floodFill: [
+        'layerIndex',
+        'x',
+        'y',
+        'rgb',
+        'opacity',
+        'tolerance',
+        'sampleStr',
+        'grow',
+        'isContiguous',
+    ],
+    drawShape: ['layerIndex', 'shapeObj'],
+    drawGradient: ['layerIndex', 'gradientObj'],
+    text: ['layerIndex', 'p'],
+    eraseLayer: ['p'],
+    setSelection: ['selection'],
+};
+
+/** A call's arguments as named fields (undefined ones left out). */
+export function canvasFields(
+    method: TKlrCanvasMethod,
+    args: readonly unknown[],
+): Record<string, TKlrValue> {
+    const names = CANVAS_PARAMS[method];
+    if (args.length > names.length && args.slice(names.length).some((a) => a !== undefined)) {
+        throw new KlrUnencodable(method + ': more arguments than its signature has');
+    }
+    const out: Record<string, TKlrValue> = {};
+    names.forEach((name, i) => {
+        if (args[i] !== undefined) {
+            out[name] = args[i] as TKlrValue;
+        }
+    });
+    return out;
+}
+
+// Brushes by index. Append only.
 export const BRUSH_IDS = [
     'penBrush',
     'blendBrush',
@@ -321,6 +344,147 @@ export const BRUSH_IDS = [
 ] as const;
 export type TKlrBrushId = (typeof BRUSH_IDS)[number];
 
+/** Each brush's recorded fields as of opsV 0 (BRUSH's mask bit k is field k). A new field is
+ * a new opcode. klr-brushes.ts reads and restores them. */
+export const BRUSH_FIELDS: Record<TKlrBrushId, readonly string[]> = {
+    penBrush: [
+        'settingSize',
+        'settingSpacing',
+        'settingOpacity',
+        'settingScatter',
+        'settingColor',
+        'settingAlphaId',
+        'settingLockLayerAlpha',
+        'settingHasSizePressure',
+        'settingHasOpacityPressure',
+        'settingHasScatterPressure',
+    ],
+    blendBrush: [
+        'size',
+        'opacity',
+        'blending',
+        'color',
+        'settingLockLayerAlpha',
+        'settingSizePressure',
+        'settingOpacityPressure',
+    ],
+    // sketchySeed advances with every segment and lives across strokes
+    sketchyBrush: [
+        'settingSize',
+        'settingOpacity',
+        'settingBlending',
+        'settingScale',
+        'settingColor',
+        'sketchySeed',
+    ],
+    pixelBrush: [
+        'settingSize',
+        'settingSpacing',
+        'settingOpacity',
+        'settingColor',
+        'settingLockLayerAlpha',
+        'settingIsEraser',
+        'settingHasSizePressure',
+        'settingPattern',
+        'settingTip',
+    ],
+    chemyBrush: [
+        'settingSize',
+        'settingOpacity',
+        'settingColor',
+        'settingLockLayerAlpha',
+        'settingIsEraser',
+        'settingMode',
+        'settingDistort',
+        'settingXSymmetry',
+        'settingYSymmetry',
+        'settingGradient',
+    ],
+    smudgeBrush: [
+        'settingSize',
+        'settingSpacing',
+        'settingOpacity',
+        'settingColor',
+        'settingLockLayerAlpha',
+        'settingHasSizePressure',
+        'settingHasOpacityPressure',
+    ],
+    eraserBrush: [
+        'size',
+        'spacing',
+        'opacity',
+        'useSizePressure',
+        'useOpacityPressure',
+        'isTransparentBG',
+    ],
+};
+
+/** Klecks's TMixMode order. Append only. */
+export const MIX_MODES = [
+    'source-over',
+    'darken',
+    'multiply',
+    'color-burn',
+    'lighten',
+    'screen',
+    'color-dodge',
+    'overlay',
+    'soft-light',
+    'hard-light',
+    'difference',
+    'exclusion',
+    'hue',
+    'saturation',
+    'color',
+    'luminosity',
+] as const;
+
+/** The OPS stream's channels, in id order. Append only. */
+const TABLE = channelTable<string>([
+    ['OP', 64],
+    ['ODT', 64],
+    ...penChannelSpec(['P']),
+    ['SEED', 1],
+    ['XFER', 2],
+    ['UPDT', 1],
+    ['LXY', 2],
+    ['LAYER', 2],
+    ['ID', 2],
+    ['BRUSHID', 1],
+    ['BMASK', 8],
+    ['MISC', 4],
+    ['VTAG', 4],
+    ['VINT', 4],
+    ['F64', 2],
+    ['VLEN', 2],
+    ['BYTES', 1],
+    ['COLOR', 3],
+    ['EXTC', 1],
+]);
+export const KLR_CHANNELS: readonly Channel[] = TABLE.list;
+const C = TABLE.ch as Record<
+    | 'OP'
+    | 'ODT'
+    | 'SEED'
+    | 'XFER'
+    | 'UPDT'
+    | 'LXY'
+    | 'LAYER'
+    | 'ID'
+    | 'BRUSHID'
+    | 'BMASK'
+    | 'MISC'
+    | 'VTAG'
+    | 'VINT'
+    | 'F64'
+    | 'VLEN'
+    | 'BYTES'
+    | 'COLOR'
+    | 'EXTC',
+    Channel
+>;
+const PEN = penStrokeChannels(TABLE.ch, ['P']);
+
 // ---------------------------------------------------------------- values
 
 export type TKlrValue =
@@ -329,7 +493,6 @@ export type TKlrValue =
     | boolean
     | number
     | string
-    | Uint8Array
     | TKlrValue[]
     | { [key: string]: TKlrValue };
 
@@ -338,12 +501,13 @@ const V_NULL = 1;
 const V_FALSE = 2;
 const V_TRUE = 3;
 const V_INT = 4;
-const V_F32 = 5;
-const V_F64 = 6;
-const V_STR = 7;
-const V_ARR = 8;
-const V_OBJ = 9;
-const V_BYTES = 10;
+const V_F64 = 5;
+const V_STR = 6;
+const V_ARR = 7;
+const V_OBJ = 8;
+const V_RGB = 9;
+const MAX_DEPTH = 32;
+const MAX_LEN = 1 << 26; // a longer length is a damaged stream
 
 export class KlrUnencodable extends Error {}
 
@@ -359,6 +523,10 @@ function isHostObject(v: object): boolean {
         'CanvasPattern',
         'CanvasGradient',
         'Blob',
+        'Map',
+        'Set',
+        'Date',
+        'Promise',
     ]) {
         if (typeof g[name] === 'function' && v instanceof g[name]) {
             return true;
@@ -367,60 +535,131 @@ function isHostObject(v: object): boolean {
     return false;
 }
 
-/** Tagged value: plain data only. Throws KlrUnencodable for functions, canvases, images... */
-export function writeValue(w: ByteWriter, v: unknown, depth = 0): void {
-    if (depth > 32) {
+/** A plain copy of v as a value holds it. Throws KlrUnencodable for what a value can't hold
+ * (functions, canvases, images, typed arrays...). */
+export function toKlrValue(v: unknown, depth = 0): TKlrValue {
+    if (depth > MAX_DEPTH) {
         throw new KlrUnencodable('too deep');
     }
-    if (v === undefined) {
-        w.u8(V_UNDEF);
-    } else if (v === null) {
-        w.u8(V_NULL);
-    } else if (v === false) {
-        w.u8(V_FALSE);
-    } else if (v === true) {
-        w.u8(V_TRUE);
-    } else if (typeof v === 'number') {
-        if (Number.isSafeInteger(v) && !Object.is(v, -0)) {
-            w.u8(V_INT);
-            w.svarint(v);
-        } else if (Math.fround(v) === v || Object.is(v, -0)) {
-            w.u8(V_F32);
-            w.f32(v);
-        } else {
-            w.u8(V_F64);
-            w.f64(v);
-        }
-    } else if (typeof v === 'string') {
-        w.u8(V_STR);
-        w.string(v);
-    } else if (v instanceof Uint8Array) {
-        w.u8(V_BYTES);
-        w.blob(v);
-    } else if (Array.isArray(v)) {
-        w.u8(V_ARR);
-        w.varint(v.length);
-        for (const item of v) {
-            writeValue(w, item, depth + 1);
-        }
-    } else if (typeof v === 'object') {
-        if (ArrayBuffer.isView(v) || isHostObject(v)) {
+    if (v === undefined || v === null || typeof v === 'boolean' || typeof v === 'number') {
+        return v;
+    }
+    if (typeof v === 'string') {
+        return v;
+    }
+    if (Array.isArray(v)) {
+        return v.map((item) => toKlrValue(item, depth + 1));
+    }
+    if (typeof v === 'object') {
+        if (ArrayBuffer.isView(v) || v instanceof ArrayBuffer || isHostObject(v)) {
             throw new KlrUnencodable('not plain data');
         }
+        const out: Record<string, TKlrValue> = {};
+        for (const key of Object.keys(v)) {
+            out[key] = toKlrValue((v as Record<string, unknown>)[key], depth + 1);
+        }
+        return out;
+    }
+    throw new KlrUnencodable('not plain data: ' + typeof v);
+}
+
+const f64View = new DataView(new ArrayBuffer(8));
+
+function isRgb(v: object): v is { r: number; g: number; b: number } {
+    const keys = Object.keys(v);
+    if (keys.length !== 3 || keys[0] !== 'r' || keys[1] !== 'g' || keys[2] !== 'b') {
+        return false;
+    }
+    const o = v as Record<string, unknown>;
+    return [o.r, o.g, o.b].every((c) => Number.isInteger(c) && (c as number) >= 0 && (c as number) <= 255);
+}
+
+function writeString(s: Sink, str: string): void {
+    const b = utf8Encoder.encode(str);
+    s.u(C.VLEN, b.length, 1);
+    for (let i = 0; i < b.length; i++) {
+        s.u(C.BYTES, b[i]);
+    }
+}
+
+function readBytes(src: Source, n: number): Uint8Array {
+    if (n > MAX_LEN) {
+        throw new Error('klr: a length of ' + n);
+    }
+    const b = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+        b[i] = src.u(C.BYTES);
+    }
+    return b;
+}
+
+function readString(src: Source): string {
+    return utf8Decoder.decode(readBytes(src, src.u(C.VLEN, 1)));
+}
+
+/** A self-describing value (PEN-CODER.md 8.3, "Values"). */
+export function writeValue(s: Sink, v: unknown, depth = 0): void {
+    if (depth > MAX_DEPTH) {
+        throw new KlrUnencodable('too deep');
+    }
+    const d = Math.min(depth, 3);
+    if (v === undefined) {
+        s.u(C.VTAG, V_UNDEF, d);
+    } else if (v === null) {
+        s.u(C.VTAG, V_NULL, d);
+    } else if (v === false) {
+        s.u(C.VTAG, V_FALSE, d);
+    } else if (v === true) {
+        s.u(C.VTAG, V_TRUE, d);
+    } else if (typeof v === 'number') {
+        // integers the pen coder's model holds (2^52), not -0; the rest exactly as f64
+        if (Number.isInteger(v) && Math.abs(v) <= 2 ** 52 && !Object.is(v, -0)) {
+            s.u(C.VTAG, V_INT, d);
+            s.s(C.VINT, v, d);
+        } else {
+            s.u(C.VTAG, V_F64, d);
+            f64View.setFloat64(0, v);
+            s.u(C.F64, f64View.getUint32(0), 0);
+            s.u(C.F64, f64View.getUint32(4), 1);
+        }
+    } else if (typeof v === 'string') {
+        s.u(C.VTAG, V_STR, d);
+        writeString(s, v);
+    } else if (Array.isArray(v)) {
+        s.u(C.VTAG, V_ARR, d);
+        s.u(C.VLEN, v.length, 0);
+        for (const item of v) {
+            writeValue(s, item, depth + 1);
+        }
+    } else if (typeof v === 'object') {
+        if (ArrayBuffer.isView(v) || v instanceof ArrayBuffer || isHostObject(v)) {
+            throw new KlrUnencodable('not plain data');
+        }
+        if (isRgb(v)) {
+            s.u(C.VTAG, V_RGB, d);
+            s.u(C.COLOR, v.r, 0);
+            s.u(C.COLOR, v.g, 1);
+            s.u(C.COLOR, v.b, 2);
+            return;
+        }
         const keys = Object.keys(v);
-        w.u8(V_OBJ);
-        w.varint(keys.length);
+        s.u(C.VTAG, V_OBJ, d);
+        s.u(C.VLEN, keys.length, 0);
         for (const key of keys) {
-            w.string(key);
-            writeValue(w, (v as Record<string, unknown>)[key], depth + 1);
+            writeString(s, key);
+            writeValue(s, (v as Record<string, unknown>)[key], depth + 1);
         }
     } else {
         throw new KlrUnencodable('not plain data: ' + typeof v);
     }
 }
 
-export function readValue(r: ByteReader): TKlrValue {
-    const tag = r.u8();
+export function readValue(src: Source, depth = 0): TKlrValue {
+    if (depth > MAX_DEPTH) {
+        throw new Error('klr: a value too deep');
+    }
+    const d = Math.min(depth, 3);
+    const tag = src.u(C.VTAG, d);
     switch (tag) {
         case V_UNDEF:
             return undefined;
@@ -431,41 +670,40 @@ export function readValue(r: ByteReader): TKlrValue {
         case V_TRUE:
             return true;
         case V_INT:
-            return r.svarint();
-        case V_F32:
-            return r.f32();
+            return src.s(C.VINT, d);
         case V_F64:
-            return r.f64();
+            f64View.setUint32(0, src.u(C.F64, 0));
+            f64View.setUint32(4, src.u(C.F64, 1));
+            return f64View.getFloat64(0);
         case V_STR:
-            return r.string();
-        case V_BYTES:
-            return r.blob().slice();
+            return readString(src);
         case V_ARR: {
-            const n = r.varint();
+            const n = src.u(C.VLEN, 0);
+            if (n > MAX_LEN) {
+                throw new Error('klr: a length of ' + n);
+            }
             const out: TKlrValue[] = [];
             for (let i = 0; i < n; i++) {
-                out.push(readValue(r));
+                out.push(readValue(src, depth + 1));
             }
             return out;
         }
         case V_OBJ: {
-            const n = r.varint();
+            const n = src.u(C.VLEN, 0);
+            if (n > MAX_LEN) {
+                throw new Error('klr: a length of ' + n);
+            }
             const out: Record<string, TKlrValue> = {};
             for (let i = 0; i < n; i++) {
-                const key = r.string();
-                out[key] = readValue(r);
+                const key = readString(src);
+                out[key] = readValue(src, depth + 1);
             }
             return out;
         }
+        case V_RGB:
+            return { r: src.u(C.COLOR, 0), g: src.u(C.COLOR, 1), b: src.u(C.COLOR, 2) };
     }
     throw new Error('klr: bad value tag ' + tag);
-}
-
-/** Encodes to bytes on its own, so a caller can find out first whether it encodes. */
-export function encodeValue(v: unknown): Uint8Array {
-    const w = new ByteWriter(64);
-    writeValue(w, v);
-    return w.toBytes();
 }
 
 // ---------------------------------------------------------------- hashing
@@ -502,446 +740,744 @@ export type TKlrTiles = {
     layers?: TKlrTilesLayer[];
 };
 
+/** A stroke sample: [t ms (in the chunk), x, y (1/32 px), pressure (0-255)], integers. */
+export type TKlrSample = [number, number, number, number];
+
 export type TKlrOp =
-    | { op: 'down'; t: number; x: number; y: number; p: number; seed: number }
-    | { op: 'move'; t: number; x: number; y: number; p: number }
-    | { op: 'up'; t: number }
-    // shift+click line; x0/y0 null: from where the brush last was
+    // DOWN to UP: the samples (the first at the op's time t), the easel's transfers (each the
+    // number of samples the brush had been given when it ran), the UP's time.
+    // grid: where the encoder looks for the pointer's lattice (not stored).
+    | {
+          op: 'stroke';
+          t: number;
+          seed: number;
+          samples: TKlrSample[];
+          transfers: number[];
+          upT: number;
+          grid?: PenGrid | null;
+      }
+    // shift+click line, px (quantized to 1/32); x0/y0 null: from where the brush last was
     | { op: 'line'; t: number; x0: number | null; y0: number | null; x1: number; y1: number; seed: number }
-    | { op: 'transfer'; t: number }
     | { op: 'brush'; t: number; brush: TKlrBrushId; settings: Record<string, TKlrValue> }
     | { op: 'layer'; t: number; index: number }
-    | { op: 'canvas'; t: number; method: TKlrCanvasMethod; args: TKlrValue[] }
-    | { op: 'filter'; t: number; name: string; layer: number; seed: number; input: TKlrValue }
+    | { op: 'active'; t: number; index: number }
     | { op: 'undo'; t: number }
     | { op: 'redo'; t: number }
-    | { op: 'active'; t: number; index: number }
-    | { op: 'sample'; t: number; id: number; layer: number }
-    | { op: 'xform'; t: number; sample: number; params: TKlrValue }
-    | { op: 'ffd'; t: number; sample: number; params: TKlrValue }
     | { op: 'copy'; t: number; id: number; mask: boolean }
-    | { op: 'paste'; t: number; id: number; params: TKlrValue }
+    | { op: 'paste'; t: number; id: number; params: Record<string, TKlrValue> }
+    | { op: 'sample'; t: number; id: number; layer: number }
+    | { op: 'xform'; t: number; sample: number; params: Record<string, TKlrValue> }
+    | { op: 'ffd'; t: number; sample: number; params: Record<string, TKlrValue> }
+    | { op: 'filter'; t: number; name: string; layer: number; seed: number; input: TKlrValue }
+    | { op: 'canvas'; t: number; method: TKlrCanvasMethod; fields: Record<string, TKlrValue> }
     | { op: 'tiles'; t: number; tiles: TKlrTiles }
-    | { op: 'hash'; t: number; hashes: number[] }
-    // the picture the draft restored (layer hashes), from which a fresh undo history starts
-    | { op: 'restore'; t: number; hashes: number[] };
+    // skippable: a reader skips a code it doesn't know (no codes yet)
+    | { op: 'ext'; t: number; code: number; bytes: Uint8Array };
 
-// An op as the recorder hands it over: the writer adds the time.
+// An op as the recorder hands it over: the time is added.
 export type TKlrOpInput = TKlrOp extends infer O
     ? O extends { t: number }
         ? Omit<O, 't'>
         : never
     : never;
 
-function writeTile(w: ByteWriter, tile: TKlrTile): void {
-    if (!tile) {
-        w.u8(0);
-    } else if ('fill' in tile) {
-        w.u8(1);
-        w.string(tile.fill);
-    } else {
-        w.u8(2);
-        w.varint(tile.w);
-        w.varint(tile.h);
-        w.bytes(tile.data);
+const uint = (v: unknown, what: string): number => {
+    if (!Number.isSafeInteger(v) || (v as number) < 0) {
+        throw new KlrUnencodable(what + ': not an index: ' + String(v));
     }
-}
+    return v as number;
+};
+const int = (v: unknown, what: string): number => {
+    if (!Number.isSafeInteger(v)) {
+        throw new KlrUnencodable(what + ': not an integer: ' + String(v));
+    }
+    return v as number;
+};
+const bool = (v: unknown, what: string): number => {
+    if (typeof v !== 'boolean') {
+        throw new KlrUnencodable(what + ': not a boolean: ' + String(v));
+    }
+    return v ? 1 : 0;
+};
+const mixIndex = (v: unknown, what: string): number => {
+    const i = MIX_MODES.indexOf(v as (typeof MIX_MODES)[number]);
+    if (i < 0) {
+        throw new KlrUnencodable(what + ': not a mix mode: ' + String(v));
+    }
+    return i;
+};
+const coord = (v: number): number => int(Math.round(v * COORD_SCALE), 'a coordinate');
 
-function readTile(r: ByteReader): TKlrTile {
-    const kind = r.u8();
-    if (kind === 0) {
-        return undefined;
-    }
-    if (kind === 1) {
-        return { fill: r.string() };
-    }
-    const w = r.varint();
-    const h = r.varint();
-    return { w, h, data: r.bytes(w * h * 4).slice() };
-}
+/** Writes ops into one sink: one per chunk (the clock, the pen coder and every "last" start
+ * over). Also the dry run that tells whether an op encodes (onto a throwaway sink). */
+class OpsEncoder {
+    private readonly s: Sink;
+    private readonly pen: PenStrokeEncoder;
+    private prev = 0; // the previous opcode
+    clock = 0; // ms from the chunk's start
+    readonly tiles: TKlrTile[] = [];
 
-function writeTiles(w: ByteWriter, t: TKlrTiles): void {
-    w.u8(
-        (t.size ? 1 : 0) |
-            (t.selection ? 2 : 0) |
-            (t.activeLayer !== undefined ? 4 : 0) |
-            (t.layers ? 8 : 0) |
-            (t.replaceTop ? 16 : 0),
-    );
-    if (t.size) {
-        w.varint(t.size.width);
-        w.varint(t.size.height);
+    constructor(s: Sink, penFlags: number) {
+        this.s = s;
+        this.pen = new PenStrokeEncoder(s, PEN, penFlags);
     }
-    if (t.selection) {
-        writeValue(w, t.selection.value);
+
+    private head(code: number, t: number): void {
+        t = Math.max(this.clock, Math.round(t));
+        this.s.u(C.OP, code, Math.min(this.prev, 63));
+        this.s.u(C.ODT, t - this.clock, Math.min(code, 63));
+        this.clock = t;
+        this.prev = code;
     }
-    if (t.activeLayer !== undefined) {
-        w.svarint(t.activeLayer);
+
+    end(): void {
+        this.s.u(C.OP, OPC.END, Math.min(this.prev, 63));
     }
-    if (t.layers) {
-        w.varint(t.layers.length);
-        for (const layer of t.layers) {
-            w.svarint(layer.src);
-            writeValue(w, layer.props);
-            if (layer.tiles) {
-                w.varint(layer.tiles.length + 1);
-                layer.tiles.forEach((tile) => writeTile(w, tile));
-            } else {
-                w.varint(0);
+
+    op(op: TKlrOp): void {
+        const s = this.s;
+        switch (op.op) {
+            case 'stroke': {
+                if (!op.samples.length) {
+                    throw new KlrUnencodable('a stroke without samples');
+                }
+                this.head(OPC.STROKE, op.t);
+                s.u(C.SEED, uint(op.seed, 'seed'));
+                // times monotonic from the op's; integers, pressure a byte
+                let last = this.clock;
+                const S = op.samples.map((p, i) => {
+                    const t = i === 0 ? this.clock : Math.max(last, Math.round(p[0]));
+                    last = t;
+                    return [t, int(p[1], 'x'), int(p[2], 'y'), Math.max(0, Math.min(255, Math.round(p[3])))];
+                });
+                KlrSampleCoder.encode(this.pen, S, op.grid ?? null);
+                s.u(C.XFER, op.transfers.length, 0);
+                let place = 0;
+                for (const x of op.transfers) {
+                    const at = Math.max(place, uint(x, 'transfer'));
+                    s.u(C.XFER, at - place, 1);
+                    place = at;
+                }
+                const upT = Math.max(last, Math.round(op.upT));
+                s.u(C.UPDT, upT - last);
+                this.clock = upT;
+                return;
             }
+            case 'line': {
+                this.head(OPC.LINE, op.t);
+                s.u(C.SEED, uint(op.seed, 'seed'));
+                const fromLast = op.x0 === null || op.y0 === null;
+                s.u(C.MISC, fromLast ? 1 : 0, 0);
+                if (!fromLast) {
+                    s.s(C.LXY, coord(op.x0!), 0);
+                    s.s(C.LXY, coord(op.y0!), 1);
+                }
+                s.s(C.LXY, coord(op.x1), 0);
+                s.s(C.LXY, coord(op.y1), 1);
+                return;
+            }
+            case 'brush': {
+                const id = BRUSH_IDS.indexOf(op.brush);
+                if (id < 0) {
+                    throw new KlrUnencodable('unknown brush ' + op.brush);
+                }
+                const fields = BRUSH_FIELDS[op.brush];
+                const extra = Object.keys(op.settings).filter((k) => !fields.includes(k));
+                if (extra.length) {
+                    throw new KlrUnencodable(op.brush + ': fields not in BRUSH_FIELDS: ' + extra);
+                }
+                let mask = 0;
+                fields.forEach((f, k) => {
+                    if (f in op.settings) {
+                        mask += 2 ** k;
+                    }
+                });
+                this.head(OPC.BRUSH, op.t);
+                s.u(C.BRUSHID, id);
+                s.u(C.BMASK, mask, Math.min(id, 7));
+                fields.forEach((f) => {
+                    if (f in op.settings) {
+                        writeValue(s, op.settings[f]);
+                    }
+                });
+                return;
+            }
+            case 'layer':
+            case 'active':
+                this.head(op.op === 'layer' ? OPC.LAYER : OPC.ACTIVE, op.t);
+                s.u(C.LAYER, uint(op.index, op.op), 0);
+                return;
+            case 'undo':
+                this.head(OPC.UNDO, op.t);
+                return;
+            case 'redo':
+                this.head(OPC.REDO, op.t);
+                return;
+            case 'copy':
+                this.head(OPC.COPY, op.t);
+                s.u(C.ID, uint(op.id, 'id'), 0);
+                s.u(C.MISC, bool(op.mask, 'mask'), 0);
+                return;
+            case 'paste':
+                this.head(OPC.PASTE, op.t);
+                s.u(C.ID, uint(op.id, 'id'), 0);
+                writeValue(s, op.params);
+                return;
+            case 'sample':
+                this.head(OPC.SAMPLE, op.t);
+                s.u(C.ID, uint(op.id, 'id'), 1);
+                s.u(C.LAYER, uint(op.layer, 'layer'), 1);
+                return;
+            case 'xform':
+            case 'ffd':
+                this.head(op.op === 'xform' ? OPC.XFORM : OPC.FFD, op.t);
+                s.u(C.ID, uint(op.sample, 'sample'), 1);
+                writeValue(s, op.params);
+                return;
+            case 'filter':
+                this.head(OPC.FILTER, op.t);
+                writeValue(s, { name: op.name, layer: op.layer, seed: op.seed, input: op.input });
+                return;
+            case 'tiles': {
+                this.head(OPC.TILES, op.t);
+                const t = op.tiles;
+                const v: Record<string, TKlrValue> = {};
+                if (t.replaceTop) {
+                    v.replaceTop = true;
+                }
+                if (t.size) {
+                    v.size = { width: t.size.width, height: t.size.height };
+                }
+                if (t.selection) {
+                    v.selection = { value: t.selection.value };
+                }
+                if (t.activeLayer !== undefined) {
+                    v.activeLayer = t.activeLayer;
+                }
+                if (t.layers) {
+                    v.layers = t.layers.map((layer) => {
+                        const out: Record<string, TKlrValue> = { src: layer.src, props: layer.props };
+                        if (layer.tiles) {
+                            out.tiles = layer.tiles.map((tile) => {
+                                if (!tile) {
+                                    return -1;
+                                }
+                                this.tiles.push(tile);
+                                return this.tiles.length - 1;
+                            });
+                        }
+                        return out;
+                    });
+                }
+                writeValue(s, v);
+                return;
+            }
+            case 'ext':
+                this.head(OPC.EXT, op.t);
+                s.u(C.EXTC, uint(op.code, 'code'));
+                s.u(C.VLEN, op.bytes.length, 1);
+                for (let i = 0; i < op.bytes.length; i++) {
+                    s.u(C.BYTES, op.bytes[i]);
+                }
+                return;
+            case 'canvas':
+                this.canvas(op);
+                return;
+        }
+        throw new KlrUnencodable('unknown op ' + (op as { op: string }).op);
+    }
+
+    private canvas(op: Extract<TKlrOp, { op: 'canvas' }>): void {
+        const s = this.s;
+        const f = op.fields;
+        const scalar = (SCALAR_METHODS as readonly string[]).indexOf(op.method);
+        if (scalar < 0) {
+            const named = (NAMED_METHODS as readonly string[]).indexOf(op.method);
+            if (named < 0) {
+                throw new KlrUnencodable('unknown canvas method ' + op.method);
+            }
+            this.head(OPC_NAMED + named, op.t);
+            writeValue(s, f);
+            return;
+        }
+        // check before writing anything: the range coder can't take half an op back
+        const m = op.method;
+        const layer = uint(f[CANVAS_PARAMS[m][0]], m);
+        const more = (): void => {
+            switch (m) {
+                case 'setOpacity':
+                    if (typeof f.opacity !== 'number') {
+                        throw new KlrUnencodable('setOpacity: not a number');
+                    }
+                    writeValue(s, f.opacity);
+                    return;
+                case 'setLayerIsVisible':
+                    s.u(C.MISC, bool(f.isVisible, m), 0);
+                    return;
+                case 'setLayerHasClipping':
+                    s.u(C.MISC, bool(f.hasClipping, m), 0);
+                    return;
+                case 'moveLayer':
+                    s.s(C.MISC, int(f.delta, m), 2);
+                    return;
+                case 'mergeLayer':
+                    s.u(C.MISC, f.mixModeStr === undefined ? 0 : mixIndex(f.mixModeStr, m) + 1, 1);
+                    return;
+                case 'renameLayer':
+                    if (typeof f.name !== 'string') {
+                        throw new KlrUnencodable('renameLayer: not a string');
+                    }
+                    writeValue(s, f.name);
+                    return;
+                case 'setMixMode':
+                    s.u(C.MISC, mixIndex(f.mixModeStr, m), 1);
+                    return;
+            }
+        };
+        if (m === 'mergeLayer' && f.mixModeStr !== undefined) {
+            mixIndex(f.mixModeStr, m);
+        } else if (m === 'setMixMode') {
+            mixIndex(f.mixModeStr, m);
+        } else if (m === 'setLayerIsVisible' || m === 'setLayerHasClipping') {
+            bool(m === 'setLayerIsVisible' ? f.isVisible : f.hasClipping, m);
+        } else if (m === 'moveLayer') {
+            int(f.delta, m);
+        } else if (m === 'setOpacity' && typeof f.opacity !== 'number') {
+            throw new KlrUnencodable('setOpacity: not a number');
+        } else if (m === 'renameLayer' && typeof f.name !== 'string') {
+            throw new KlrUnencodable('renameLayer: not a string');
+        }
+        this.head(OPC_SCALAR + scalar, op.t);
+        s.u(C.LAYER, layer, 1);
+        more();
+    }
+}
+
+/**
+ * The seam for stroke samples: every stroke's samples go through here, onto the shared pen
+ * coder (pen-coder.ts, vendored from 2draw: PenStrokeEncoder / PenStrokeDecoder, one of each
+ * per chunk), and nothing else knows how they are coded.
+ */
+export const KlrSampleCoder = {
+    encode(enc: PenStrokeEncoder, S: number[][], grid: PenGrid | null): void {
+        enc.stroke(S, grid);
+    },
+    decode(dec: PenStrokeDecoder, t0: number): TKlrSample[] {
+        return dec.stroke(t0) as TKlrSample[];
+    },
+};
+
+/**
+ * The op, checked and copied as it will be coded: its values made plain copies (the app may
+ * change the objects it passed later), then coded on a throwaway sink, so an op that can't be
+ * coded is known before any of it is (throws KlrUnencodable). Strokes are made by the recorder
+ * from numbers and aren't checked.
+ */
+export function prepareOp<O extends TKlrOpInput>(op: O): O {
+    let out: TKlrOpInput;
+    switch (op.op) {
+        case 'brush':
+            out = { ...op, settings: toKlrValue(op.settings) as Record<string, TKlrValue> };
+            break;
+        case 'paste':
+        case 'xform':
+        case 'ffd':
+            out = { ...op, params: toKlrValue(op.params) as Record<string, TKlrValue> };
+            break;
+        case 'filter':
+            out = { ...op, input: toKlrValue(op.input) };
+            break;
+        case 'canvas':
+            out = { ...op, fields: toKlrValue(op.fields) as Record<string, TKlrValue> };
+            break;
+        case 'tiles':
+            out = op; // the recorder's own copies
+            break;
+        default:
+            out = op;
+    }
+    if (out.op !== 'stroke') {
+        new OpsEncoder(new VarintSink(), KLR_PEN_FLAGS).op({ ...out, t: 0 } as TKlrOp);
+    }
+    return out as O;
+}
+
+export type TKlrOpsChunk = {
+    opsV: number;
+    engineV: number;
+    coder: number;
+    penFlags: number;
+    klrFlags: number;
+    startMs: number; // since the recording began
+    durationMs: number; // the clock at the chunk's end: its last op's time (a stroke's: its UP)
+    opCount: number;
+    restore?: number[]; // the chunk starts on a draft restore: the restored picture's hashes
+    endHashes: number[]; // at the seal; empty: not taken (sealed during a stroke)
+    ops: TKlrOp[]; // t: ms from startMs
+    skipped: number; // EXT ops a reader skipped
+};
+
+export type TKlrChunkInput = {
+    startMs: number;
+    ops: TKlrOp[]; // t: ms from startMs
+    restore?: number[];
+    endHashes: number[];
+    engineV?: number;
+};
+
+function writeHashes(w: ByteWriter, hashes: readonly number[]): void {
+    w.varint(hashes.length);
+    hashes.forEach((h) => w.u32(h));
+}
+
+function readHashes(r: ByteReader): number[] {
+    const n = r.varint();
+    if (n > 4096) {
+        throw new Error('klr: ' + n + ' layer hashes');
+    }
+    const out: number[] = [];
+    for (let i = 0; i < n; i++) {
+        out.push(r.u32());
+    }
+    return out;
+}
+
+/** An OPS chunk and, when its TILES ops hold pixels, the TILES chunk after it: framed. */
+export function encodeOpsChunk(c: TKlrChunkInput): Uint8Array {
+    const sink = newSink(KLR_CODER, KLR_CHANNELS);
+    const enc = new OpsEncoder(sink, KLR_PEN_FLAGS);
+    for (const op of c.ops) {
+        enc.op(op);
+    }
+    enc.end();
+    const stream = sink.finish();
+    const w = new ByteWriter(64 + stream.length);
+    w.varint(KLR_OPS_V);
+    w.varint(c.engineV ?? KLR_ENGINE_V);
+    w.u8(KLR_CODER);
+    w.u8(KLR_PEN_FLAGS);
+    w.varint(0); // klrFlags
+    w.varint(Math.max(0, Math.round(c.startMs)));
+    w.varint(enc.clock);
+    w.varint(c.ops.length);
+    w.u8(c.restore ? 1 : 0);
+    if (c.restore) {
+        writeHashes(w, c.restore);
+    }
+    writeHashes(w, c.endHashes);
+    w.bytes(stream);
+    const out = [encodeChunk(CHUNK_OPS, w.toBytes())];
+    if (enc.tiles.length) {
+        out.push(encodeChunk(CHUNK_TILES, encodeTiles(enc.tiles)));
+    }
+    return concatBytes(out);
+}
+
+function encodeTiles(tiles: TKlrTile[]): Uint8Array {
+    const w = new ByteWriter(1024);
+    w.varint(tiles.length);
+    for (const tile of tiles) {
+        if (!tile) {
+            w.u8(0);
+        } else if ('fill' in tile) {
+            w.u8(1);
+            w.string(tile.fill);
+        } else {
+            w.u8(2);
+            w.varint(tile.w);
+            w.varint(tile.h);
+            if (tile.data.length !== tile.w * tile.h * 4) {
+                throw new Error('klr: a tile of the wrong size');
+            }
+            w.bytes(tile.data);
         }
     }
+    return w.toBytes();
 }
 
-function readTiles(r: ByteReader): TKlrTiles {
-    const flags = r.u8();
-    const out: TKlrTiles = {};
-    if (flags & 16) {
-        out.replaceTop = true;
-    }
-    if (flags & 1) {
-        out.size = { width: r.varint(), height: r.varint() };
-    }
-    if (flags & 2) {
-        out.selection = { value: readValue(r) };
-    }
-    if (flags & 4) {
-        out.activeLayer = r.svarint();
-    }
-    if (flags & 8) {
-        const n = r.varint();
-        out.layers = [];
-        for (let i = 0; i < n; i++) {
-            const src = r.svarint();
-            const props = readValue(r) as Record<string, TKlrValue>;
-            const nTiles = r.varint();
-            const layer: TKlrTilesLayer = { src, props };
-            if (nTiles > 0) {
-                layer.tiles = [];
-                for (let k = 0; k < nTiles - 1; k++) {
-                    layer.tiles.push(readTile(r));
-                }
-            }
-            out.layers.push(layer);
+function decodeTiles(payload: Uint8Array): TKlrTile[] {
+    const r = new ByteReader(payload);
+    const n = r.varint();
+    const out: TKlrTile[] = [];
+    for (let i = 0; i < n; i++) {
+        const kind = r.u8();
+        if (kind === 0) {
+            out.push(undefined);
+        } else if (kind === 1) {
+            out.push({ fill: r.string() });
+        } else if (kind === 2) {
+            const w = r.varint();
+            const h = r.varint();
+            out.push({ w, h, data: r.bytes(w * h * 4).slice() });
+        } else {
+            throw new Error('klr: tile kind ' + kind);
         }
     }
     return out;
 }
 
-/**
- * The seam for stroke samples (points and pressure): every DOWN, MOVE and LINE sample goes
- * through one of these, per chunk, and nothing else knows how they are coded. Today: 1/32 px
- * zigzag varint deltas from the previous point and a u8 pressure, inline. Next: the range
- * coder shared with Lascaux Pocket (lsp-format-next.ts), swapped in here. The format is not
- * frozen yet (nothing has been recorded with it), so no reader for this coding is kept.
- */
-export class KlrSampleCoder {
-    private lastX = 0; // 1/32 px
-    private lastY = 0;
-
-    point(w: ByteWriter, x: number, y: number): void {
-        const qx = Math.round(x * COORD_SCALE);
-        const qy = Math.round(y * COORD_SCALE);
-        w.svarint(qx - this.lastX);
-        w.svarint(qy - this.lastY);
-        this.lastX = qx;
-        this.lastY = qy;
-    }
-
-    pressure(w: ByteWriter, p: number): void {
-        w.u8(Math.round(Math.max(0, Math.min(1, p)) * 255));
-    }
-
-    readPoint(r: ByteReader): [number, number] {
-        this.lastX += r.svarint();
-        this.lastY += r.svarint();
-        return [this.lastX / COORD_SCALE, this.lastY / COORD_SCALE];
-    }
-
-    readPressure(r: ByteReader): number {
-        return r.u8() / 255;
-    }
-
-    save(): unknown {
-        return [this.lastX, this.lastY];
-    }
-
-    restore(state: unknown): void {
-        [this.lastX, this.lastY] = state as [number, number];
-    }
-}
-
-/** Writes one OPS chunk's payload. A new writer per chunk: deltas and clock start over. */
-export class KlrOpsWriter {
-    private readonly w = new ByteWriter(4096);
-    private lastT = 0;
-    private readonly samples = new KlrSampleCoder();
-    opCount = 0;
-
-    constructor(startMs: number) {
-        this.w.varint(Math.max(0, Math.round(startMs)));
-    }
-
-    get length(): number {
-        return this.w.length;
-    }
-
-    private point(x: number, y: number): void {
-        this.samples.point(this.w, x, y);
-    }
-
-    private pressure(p: number): void {
-        this.samples.pressure(this.w, p);
-    }
-
-    /** t: ms since the chunk started; never goes back. Writes nothing if it throws. */
-    write(op: TKlrOpInput, t: number): void {
-        const saved = [this.w.length, this.lastT, this.opCount] as const;
-        const samples = this.samples.save();
-        try {
-            this.writeOp(op, t);
-        } catch (e) {
-            [this.w.length, this.lastT, this.opCount] = saved;
-            this.samples.restore(samples);
-            throw e;
-        }
-    }
-
-    private writeOp(op: TKlrOpInput, t: number): void {
-        const w = this.w;
-        t = Math.max(this.lastT, Math.round(t));
-        const dt = t - this.lastT;
-        this.lastT = t;
-        this.opCount++;
-        const head = (code: number) => {
-            w.u8(code);
-            w.varint(dt);
-        };
-        switch (op.op) {
-            case 'down':
-                head(OP.DOWN);
-                this.point(op.x, op.y);
-                this.pressure(op.p);
-                w.varint(op.seed);
-                return;
-            case 'move':
-                head(OP.MOVE);
-                this.point(op.x, op.y);
-                this.pressure(op.p);
-                return;
-            case 'up':
-                head(OP.UP);
-                return;
-            case 'line':
-                head(OP.LINE);
-                w.u8(op.x0 === null || op.y0 === null ? 1 : 0);
-                if (op.x0 !== null && op.y0 !== null) {
-                    this.point(op.x0, op.y0);
-                }
-                this.point(op.x1, op.y1);
-                w.varint(op.seed);
-                return;
-            case 'transfer':
-                head(OP.TRANSFER);
-                return;
-            case 'brush':
-                head(OP.BRUSH);
-                w.u8(BRUSH_IDS.indexOf(op.brush));
-                writeValue(w, op.settings);
-                return;
-            case 'layer':
-                head(OP.LAYER);
-                w.varint(op.index);
-                return;
-            case 'canvas': {
-                const i = CANVAS_METHODS.indexOf(op.method);
-                if (i < 0) {
-                    throw new Error('klr: unknown canvas method ' + op.method);
-                }
-                head(OP.CANVAS + i);
-                writeValue(w, op.args);
-                return;
-            }
-            case 'filter':
-                head(OP.FILTER);
-                w.string(op.name);
-                w.varint(op.layer);
-                w.varint(op.seed);
-                writeValue(w, op.input);
-                return;
-            case 'undo':
-                head(OP.UNDO);
-                return;
-            case 'redo':
-                head(OP.REDO);
-                return;
-            case 'active':
-                head(OP.ACTIVE);
-                w.varint(op.index);
-                return;
-            case 'sample':
-                head(OP.SAMPLE);
-                w.varint(op.id);
-                w.varint(op.layer);
-                return;
-            case 'xform':
-            case 'ffd':
-                head(op.op === 'xform' ? OP.XFORM : OP.FFD);
-                w.varint(op.sample);
-                writeValue(w, op.params);
-                return;
-            case 'copy':
-                head(OP.COPY);
-                w.varint(op.id);
-                w.u8(op.mask ? 1 : 0);
-                return;
-            case 'paste':
-                head(OP.PASTE);
-                w.varint(op.id);
-                writeValue(w, op.params);
-                return;
-            case 'tiles':
-                head(OP.TILES);
-                writeTiles(w, op.tiles);
-                return;
-            case 'restore':
-            case 'hash':
-                head(op.op === 'hash' ? OP.HASH : OP.RESTORE);
-                w.varint(op.hashes.length);
-                op.hashes.forEach((h) => w.u32(h));
-                return;
-        }
-    }
-
-    /** The payload so far (a copy). */
-    bytes(): Uint8Array {
-        return this.w.toBytes();
-    }
-}
-
-export type TKlrOpsChunk = { startMs: number; ops: TKlrOp[] };
-
-export function decodeOps(payload: Uint8Array): TKlrOpsChunk {
+/** Reads an OPS chunk's payload (and the TILES chunk's after it, if there is one). Throws
+ * on anything it can't read: the replay ends at this chunk. */
+export function decodeOpsChunk(payload: Uint8Array, tilesPayload?: Uint8Array): TKlrOpsChunk {
     const r = new ByteReader(payload);
+    const opsV = r.varint();
+    if (opsV !== KLR_OPS_V) {
+        throw new Error('klr: opsV ' + opsV);
+    }
+    const engineV = r.varint();
+    const coder = r.u8();
+    if (coder !== KLR_CODER) {
+        throw new Error('klr: coder ' + coder);
+    }
+    const penFlags = r.u8();
+    const klrFlags = r.varint();
+    if (klrFlags & ~KLR_FLAGS_KNOWN) {
+        throw new Error('klr: klrFlags ' + klrFlags);
+    }
     const startMs = r.varint();
+    const durationMs = r.varint();
+    const opCount = r.varint();
+    const restoreFlag = r.u8();
+    const restore = restoreFlag ? readHashes(r) : undefined;
+    const endHashes = readHashes(r);
+    const src = newSource(coder, KLR_CHANNELS, payload, r.pos, payload.length)!;
+    const pen = new PenStrokeDecoder(src, PEN, penFlags); // throws on flags it doesn't know
+    const tiles = tilesPayload ? decodeTiles(tilesPayload) : [];
+    const tile = (i: TKlrValue): TKlrTile => {
+        if (i === -1) {
+            return undefined;
+        }
+        if (typeof i !== 'number' || !(i >= 0 && i < tiles.length)) {
+            throw new Error('klr: no tile ' + i);
+        }
+        return tiles[i];
+    };
+
     const ops: TKlrOp[] = [];
-    let t = 0;
-    const samples = new KlrSampleCoder();
-    const point = (): [number, number] => samples.readPoint(r);
-    const pressure = () => samples.readPressure(r);
-    while (r.remaining > 0) {
-        const code = r.u8();
-        t += r.varint();
-        if (code >= OP.CANVAS && code < OP.CANVAS + CANVAS_METHODS.length) {
-            ops.push({
-                op: 'canvas',
-                t,
-                method: CANVAS_METHODS[code - OP.CANVAS],
-                args: readValue(r) as TKlrValue[],
-            });
+    let count = 0;
+    let skipped = 0;
+    let prev = 0;
+    let clock = 0;
+    for (;;) {
+        const code = src.u(C.OP, Math.min(prev, 63));
+        if (code === OPC.END) {
+            break;
+        }
+        if (++count > opCount) {
+            throw new Error('klr: more ops than the header says');
+        }
+        clock += src.u(C.ODT, Math.min(code, 63));
+        prev = code;
+        const t = clock;
+        if (code >= OPC_SCALAR && code < OPC_SCALAR + SCALAR_METHODS.length) {
+            const method = SCALAR_METHODS[code - OPC_SCALAR];
+            const names = CANVAS_PARAMS[method];
+            const fields: Record<string, TKlrValue> = { [names[0]]: src.u(C.LAYER, 1) };
+            switch (method) {
+                case 'setOpacity': {
+                    const v = readValue(src);
+                    if (typeof v !== 'number') {
+                        throw new Error('klr: setOpacity without a number');
+                    }
+                    fields.opacity = v;
+                    break;
+                }
+                case 'setLayerIsVisible':
+                    fields.isVisible = src.u(C.MISC, 0) === 1;
+                    break;
+                case 'setLayerHasClipping':
+                    fields.hasClipping = src.u(C.MISC, 0) === 1;
+                    break;
+                case 'moveLayer':
+                    fields.delta = src.s(C.MISC, 2);
+                    break;
+                case 'mergeLayer': {
+                    const m = src.u(C.MISC, 1);
+                    if (m > 0) {
+                        fields.mixModeStr = mixMode(m - 1);
+                    }
+                    break;
+                }
+                case 'renameLayer': {
+                    const v = readValue(src);
+                    if (typeof v !== 'string') {
+                        throw new Error('klr: renameLayer without a string');
+                    }
+                    fields.name = v;
+                    break;
+                }
+                case 'setMixMode':
+                    fields.mixModeStr = mixMode(src.u(C.MISC, 1));
+                    break;
+            }
+            ops.push({ op: 'canvas', t, method, fields });
+            continue;
+        }
+        if (code >= OPC_NAMED && code < OPC_NAMED + NAMED_METHODS.length) {
+            const fields = readValue(src);
+            if (!isObject(fields)) {
+                throw new Error('klr: named fields are not an object');
+            }
+            ops.push({ op: 'canvas', t, method: NAMED_METHODS[code - OPC_NAMED], fields });
             continue;
         }
         switch (code) {
-            case OP.DOWN: {
-                const [px, py] = point();
-                ops.push({ op: 'down', t, x: px, y: py, p: pressure(), seed: r.varint() });
-                break;
-            }
-            case OP.MOVE: {
-                const [px, py] = point();
-                ops.push({ op: 'move', t, x: px, y: py, p: pressure() });
-                break;
-            }
-            case OP.UP:
-                ops.push({ op: 'up', t });
-                break;
-            case OP.LINE: {
-                const fromLast = r.u8() === 1;
-                const [x0, y0] = fromLast ? [null, null] : point();
-                const [x1, y1] = point();
-                ops.push({ op: 'line', t, x0, y0, x1, y1, seed: r.varint() });
-                break;
-            }
-            case OP.TRANSFER:
-                ops.push({ op: 'transfer', t });
-                break;
-            case OP.BRUSH: {
-                const brush = BRUSH_IDS[r.u8()];
-                if (!brush) {
-                    throw new Error('klr: unknown brush');
+            case OPC.STROKE: {
+                const seed = src.u(C.SEED);
+                const samples = KlrSampleCoder.decode(pen, t);
+                const n = src.u(C.XFER, 0);
+                if (n > MAX_LEN) {
+                    throw new Error('klr: ' + n + ' transfers');
                 }
-                ops.push({
-                    op: 'brush',
-                    t,
-                    brush,
-                    settings: readValue(r) as Record<string, TKlrValue>,
+                const transfers: number[] = [];
+                let place = 0;
+                for (let i = 0; i < n; i++) {
+                    place += src.u(C.XFER, 1);
+                    transfers.push(place);
+                }
+                const upT = samples[samples.length - 1][0] + src.u(C.UPDT);
+                clock = upT;
+                ops.push({ op: 'stroke', t, seed, samples, transfers, upT });
+                break;
+            }
+            case OPC.LINE: {
+                const seed = src.u(C.SEED);
+                const fromLast = src.u(C.MISC, 0) === 1;
+                let x0: number | null = null;
+                let y0: number | null = null;
+                if (!fromLast) {
+                    x0 = src.s(C.LXY, 0) / COORD_SCALE;
+                    y0 = src.s(C.LXY, 1) / COORD_SCALE;
+                }
+                const x1 = src.s(C.LXY, 0) / COORD_SCALE;
+                const y1 = src.s(C.LXY, 1) / COORD_SCALE;
+                ops.push({ op: 'line', t, x0, y0, x1, y1, seed });
+                break;
+            }
+            case OPC.BRUSH: {
+                const id = src.u(C.BRUSHID);
+                const brush = BRUSH_IDS[id];
+                if (!brush) {
+                    throw new Error('klr: unknown brush ' + id);
+                }
+                const mask = src.u(C.BMASK, Math.min(id, 7));
+                const fields = BRUSH_FIELDS[brush];
+                if (mask >= 2 ** fields.length) {
+                    throw new Error('klr: brush mask ' + mask);
+                }
+                const settings: Record<string, TKlrValue> = {};
+                fields.forEach((f, k) => {
+                    if (Math.floor(mask / 2 ** k) % 2) {
+                        settings[f] = readValue(src);
+                    }
                 });
+                ops.push({ op: 'brush', t, brush, settings });
                 break;
             }
-            case OP.LAYER:
-                ops.push({ op: 'layer', t, index: r.varint() });
+            case OPC.LAYER:
+            case OPC.ACTIVE:
+                ops.push({ op: code === OPC.LAYER ? 'layer' : 'active', t, index: src.u(C.LAYER, 0) });
                 break;
-            case OP.FILTER: {
-                const name = r.string();
-                const layer = r.varint();
-                const seed = r.varint();
-                ops.push({ op: 'filter', t, name, layer, seed, input: readValue(r) });
-                break;
-            }
-            case OP.UNDO:
+            case OPC.UNDO:
                 ops.push({ op: 'undo', t });
                 break;
-            case OP.REDO:
+            case OPC.REDO:
                 ops.push({ op: 'redo', t });
                 break;
-            case OP.ACTIVE:
-                ops.push({ op: 'active', t, index: r.varint() });
-                break;
-            case OP.SAMPLE: {
-                const id = r.varint();
-                ops.push({ op: 'sample', t, id, layer: r.varint() });
+            case OPC.COPY: {
+                const id = src.u(C.ID, 0);
+                ops.push({ op: 'copy', t, id, mask: src.u(C.MISC, 0) === 1 });
                 break;
             }
-            case OP.XFORM:
-            case OP.FFD: {
-                const sample = r.varint();
-                ops.push({
-                    op: code === OP.XFORM ? 'xform' : 'ffd',
-                    t,
-                    sample,
-                    params: readValue(r),
-                });
+            case OPC.PASTE: {
+                const id = src.u(C.ID, 0);
+                ops.push({ op: 'paste', t, id, params: objectValue(src) });
                 break;
             }
-            case OP.COPY: {
-                const id = r.varint();
-                ops.push({ op: 'copy', t, id, mask: r.u8() === 1 });
+            case OPC.SAMPLE: {
+                const id = src.u(C.ID, 1);
+                ops.push({ op: 'sample', t, id, layer: src.u(C.LAYER, 1) });
                 break;
             }
-            case OP.PASTE: {
-                const id = r.varint();
-                ops.push({ op: 'paste', t, id, params: readValue(r) });
+            case OPC.XFORM:
+            case OPC.FFD: {
+                const sample = src.u(C.ID, 1);
+                ops.push({ op: code === OPC.XFORM ? 'xform' : 'ffd', t, sample, params: objectValue(src) });
                 break;
             }
-            case OP.TILES:
-                ops.push({ op: 'tiles', t, tiles: readTiles(r) });
-                break;
-            case OP.RESTORE:
-            case OP.HASH: {
-                const n = r.varint();
-                const hashes: number[] = [];
-                for (let i = 0; i < n; i++) {
-                    hashes.push(r.u32());
+            case OPC.FILTER: {
+                const f = objectValue(src);
+                if (typeof f.name !== 'string' || typeof f.layer !== 'number' || typeof f.seed !== 'number') {
+                    throw new Error('klr: FILTER fields');
                 }
-                ops.push({ op: code === OP.HASH ? 'hash' : 'restore', t, hashes });
+                ops.push({ op: 'filter', t, name: f.name, layer: f.layer, seed: f.seed, input: f.input });
+                break;
+            }
+            case OPC.TILES: {
+                const v = objectValue(src);
+                const out: TKlrTiles = {};
+                if (v.replaceTop === true) {
+                    out.replaceTop = true;
+                }
+                if (isObject(v.size)) {
+                    out.size = { width: v.size.width as number, height: v.size.height as number };
+                }
+                if (isObject(v.selection)) {
+                    out.selection = { value: v.selection.value };
+                }
+                if (typeof v.activeLayer === 'number') {
+                    out.activeLayer = v.activeLayer;
+                }
+                if (Array.isArray(v.layers)) {
+                    out.layers = v.layers.map((layer) => {
+                        if (!isObject(layer) || typeof layer.src !== 'number' || !isObject(layer.props)) {
+                            throw new Error('klr: TILES layer');
+                        }
+                        const l: TKlrTilesLayer = { src: layer.src, props: layer.props };
+                        if (Array.isArray(layer.tiles)) {
+                            l.tiles = layer.tiles.map(tile);
+                        }
+                        return l;
+                    });
+                }
+                ops.push({ op: 'tiles', t, tiles: out });
+                break;
+            }
+            case OPC.EXT: {
+                src.u(C.EXTC); // no codes yet: every one is skipped
+                readBytes(src, src.u(C.VLEN, 1));
+                skipped++;
                 break;
             }
             default:
-                // An opcode this build doesn't know: the rest of the chunk can't be read.
-                throw new Error('klr: unknown opcode 0x' + code.toString(16));
+                // an opcode this build doesn't know: the rest of the chunk can't be read
+                throw new Error('klr: unknown opcode ' + code);
         }
     }
-    return { startMs, ops };
+    if (count !== opCount || clock !== durationMs) {
+        throw new Error(`klr: damaged chunk (${count}/${opCount} ops, ${clock}/${durationMs} ms)`);
+    }
+    return { opsV, engineV, coder, penFlags, klrFlags, startMs, durationMs, opCount, restore, endHashes, ops, skipped };
+}
+
+function isObject(v: TKlrValue): v is Record<string, TKlrValue> {
+    return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function objectValue(src: Source): Record<string, TKlrValue> {
+    const v = readValue(src);
+    if (!isObject(v)) {
+        throw new Error('klr: named fields are not an object');
+    }
+    return v;
+}
+
+function mixMode(i: number): (typeof MIX_MODES)[number] {
+    const m = MIX_MODES[i];
+    if (!m) {
+        throw new Error('klr: mix mode ' + i);
+    }
+    return m;
 }
 
 // ---------------------------------------------------------------- head + container
@@ -955,55 +1491,73 @@ export type TKlrStartLayer = {
     fill: string; // CSS color of the whole layer
 };
 
-export type TKlrStart = { kind: 'blank'; layers: TKlrStartLayer[] } | { kind: 'reference'; url: string };
+// reference: the previous version's PSD, which 2draw gives the player (no URL in the file)
+export type TKlrStart = { kind: 'blank'; layers: TKlrStartLayer[] } | { kind: 'reference' };
 
 export type TKlrHead = {
-    formatVersion: number;
-    engineV: number;
+    headV: number;
     build: string;
     width: number;
     height: number;
+    hashTile: number;
     start: TKlrStart;
-    startHashes: number[]; // FNV-1a per layer of the start picture
+    startHashes: number[]; // per layer of the start picture
 };
 
-export function encodeHead(h: TKlrHead): Uint8Array {
+export function encodeHead(h: Omit<TKlrHead, 'headV' | 'hashTile'>): Uint8Array {
     const w = new ByteWriter(256);
-    w.varint(h.formatVersion);
-    w.varint(h.engineV);
+    w.varint(KLR_HEAD_V);
     w.string(h.build);
     w.varint(h.width);
     w.varint(h.height);
+    w.varint(KLR_HASH_TILE);
     if (h.start.kind === 'blank') {
         w.u8(0);
-        writeValue(w, h.start.layers);
+        w.varint(h.start.layers.length);
+        for (const layer of h.start.layers) {
+            w.string(layer.name);
+            w.f64(layer.opacity);
+            w.u8((layer.isVisible ? 1 : 0) | (layer.hasClipping ? 2 : 0));
+            w.varint(Math.max(0, MIX_MODES.indexOf(layer.mixModeStr as (typeof MIX_MODES)[number])));
+            w.string(layer.fill);
+        }
     } else {
         w.u8(1);
-        w.string(h.start.url);
     }
-    w.varint(h.startHashes.length);
-    h.startHashes.forEach((v) => w.u32(v));
+    writeHashes(w, h.startHashes);
     return w.toBytes();
 }
 
 export function decodeHead(payload: Uint8Array): TKlrHead {
     const r = new ByteReader(payload);
-    const formatVersion = r.varint();
-    const engineV = r.varint();
+    const headV = r.varint();
+    if (headV !== KLR_HEAD_V) {
+        throw new Error('klr: headV ' + headV);
+    }
     const build = r.string();
     const width = r.varint();
     const height = r.varint();
+    const hashTile = r.varint();
     const kind = r.u8();
-    const start: TKlrStart =
-        kind === 0
-            ? { kind: 'blank', layers: readValue(r) as TKlrStartLayer[] }
-            : { kind: 'reference', url: r.string() };
-    const n = r.varint();
-    const startHashes: number[] = [];
-    for (let i = 0; i < n; i++) {
-        startHashes.push(r.u32());
+    let start: TKlrStart;
+    if (kind === 0) {
+        const n = r.varint();
+        const layers: TKlrStartLayer[] = [];
+        for (let i = 0; i < n; i++) {
+            const name = r.string();
+            const opacity = r.f64();
+            const bits = r.u8();
+            const mixModeStr = mixMode(r.varint());
+            layers.push({ name, opacity, isVisible: !!(bits & 1), mixModeStr, hasClipping: !!(bits & 2), fill: r.string() });
+        }
+        start = { kind: 'blank', layers };
+    } else if (kind === 1) {
+        start = { kind: 'reference' };
+    } else {
+        throw new Error('klr: start ' + kind);
     }
-    return { formatVersion, engineV, build, width, height, start, startHashes };
+    const startHashes = readHashes(r);
+    return { headV, build, width, height, hashTile, start, startHashes };
 }
 
 export function encodeChunk(type: number, payload: Uint8Array): Uint8Array {
@@ -1013,13 +1567,20 @@ export function encodeChunk(type: number, payload: Uint8Array): Uint8Array {
     return w.toBytes();
 }
 
-/** magic + HEAD chunk + the given (already framed) chunks */
-export function joinKlr(head: Uint8Array, chunks: Uint8Array[]): Uint8Array {
-    return concatBytes([KLR_MAGIC, encodeChunk(CHUNK_HEAD, head), ...chunks]);
+/** magic + HEAD chunk */
+export function encodeHeadChunk(h: Omit<TKlrHead, 'headV' | 'hashTile'>): Uint8Array {
+    return concatBytes([KLR_MAGIC, encodeChunk(CHUNK_HEAD, encodeHead(h))]);
 }
 
-export type TKlrFile = { head: TKlrHead; chunks: TKlrOpsChunk[] };
+export type TKlrFile = {
+    head: TKlrHead;
+    chunks: TKlrOpsChunk[];
+    // why reading stopped early (a damaged or unknown chunk): the replay ends before it
+    error?: string;
+};
 
+/** Reads a .klr. Throws only when it isn't one (no magic, no HEAD); a chunk it can't read
+ * ends it there, with `error` saying why. */
 export function parseKlr(bytes: Uint8Array): TKlrFile {
     for (let i = 0; i < KLR_MAGIC.length; i++) {
         if (bytes[i] !== KLR_MAGIC[i]) {
@@ -1027,22 +1588,33 @@ export function parseKlr(bytes: Uint8Array): TKlrFile {
         }
     }
     const r = new ByteReader(bytes.subarray(KLR_MAGIC.length));
-    let head: TKlrHead | undefined;
-    const chunks: TKlrOpsChunk[] = [];
+    const raw: { type: number; payload: Uint8Array }[] = [];
+    let error: string | undefined;
     while (r.remaining > 0) {
-        const type = r.u8();
-        const payload = r.blob();
-        if (type === CHUNK_HEAD) {
-            head = decodeHead(payload);
-            if (head.formatVersion > KLR_FORMAT_VERSION) {
-                throw new Error('klr: format version ' + head.formatVersion + ' is newer');
-            }
-        } else if (type === CHUNK_OPS) {
-            chunks.push(decodeOps(payload));
-        } // unknown chunk types are skipped
+        try {
+            const type = r.u8();
+            raw.push({ type, payload: r.blob() });
+        } catch (e) {
+            error = 'chunk ' + raw.length + ': ' + (e as Error).message;
+            break;
+        }
     }
-    if (!head) {
+    if (raw[0]?.type !== CHUNK_HEAD) {
         throw new Error('klr: no HEAD');
     }
-    return { head, chunks };
+    const head = decodeHead(raw[0].payload);
+    const chunks: TKlrOpsChunk[] = [];
+    for (let i = 1; i < raw.length; i++) {
+        if (raw[i].type !== CHUNK_OPS) {
+            continue; // TILES are read with their OPS chunk; unknown types are skipped
+        }
+        const tiles = raw[i + 1]?.type === CHUNK_TILES ? raw[i + 1].payload : undefined;
+        try {
+            chunks.push(decodeOpsChunk(raw[i].payload, tiles));
+        } catch (e) {
+            error = 'chunk ' + i + ': ' + (e as Error).message;
+            break;
+        }
+    }
+    return { head, chunks, ...(error ? { error } : {}) };
 }

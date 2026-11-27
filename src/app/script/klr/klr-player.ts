@@ -1,8 +1,9 @@
 /**
  * Replays a .klr recording headless: a KlHistory, a KlCanvas, the brushes and filters, no UI.
  * The same calls the live app made, in the same order, with the same seeds, so in the browser
- * that drew it the result is the same pixels. Each sealed chunk ends with a HASH of every
- * layer; the player compares and counts mismatches (drift, or a bug).
+ * that drew it the result is the same pixels. Each chunk's header holds the layer hashes at its
+ * seal (and, on a draft restore, the restored picture's); the player compares and counts
+ * mismatches (drift, or a bug). Named fields are mapped to the Klecks calls here, by name.
  *
  *   const player = new KlrPlayer(bytes);       // a blank start; or { project } for a reference
  *   player.runAll();
@@ -26,7 +27,17 @@ import { FfdRenderer } from '../klecks/transform/ffd-renderer';
 import { klRandomSeed } from '../klecks/utils/kl-random';
 import { TKlProject, TMixMode } from '../klecks/kl-types';
 import { randomUuid } from '../bb/base/base';
-import { parseKlr, TKlrFile, TKlrHead, TKlrOp, TKlrBrushId, TKlrTiles } from './klr-format';
+import {
+    COORD_SCALE,
+    KLR_HASH_TILE,
+    parseKlr,
+    TKlrBrushId,
+    TKlrFile,
+    TKlrHead,
+    TKlrOp,
+    TKlrTiles,
+    TKlrValue,
+} from './klr-format';
 import {
     applyBrushSettings,
     bindBrushLayer,
@@ -36,7 +47,7 @@ import {
     createBrush,
     TKlrBrush,
 } from './klr-brushes';
-import { pasteAsLayer, TKlrPasteParams } from './klr-paste';
+import { pasteAsLayer } from './klr-paste';
 import { KlrHasher } from './klr-hash';
 import { sortLayerMap } from '../klecks/history/sort-layer-map';
 import { softwareCanvases } from '../klecks/canvas/layer-context';
@@ -46,8 +57,10 @@ export type TKlrPlayerResult = {
     strokes: number;
     ms: number;
     hashChecks: number;
-    hashMismatches: { chunk: number; layers: number[] }[];
+    hashMismatches: { chunk: number; at: 'restore' | 'end'; layers: number[] }[];
     startMismatch: boolean;
+    skipped: number; // EXT ops skipped
+    error?: string; // why the file stopped being read early: the replay ends there
 };
 
 export function blankStartProject(head: TKlrHead): TKlProject {
@@ -82,6 +95,7 @@ export class KlrPlayer {
     private ffdRenderer: FfdRenderer | undefined;
     private chunkIndex = 0;
     private opIndex = 0;
+    private chunkStarted = false;
     private readonly result: TKlrPlayerResult = {
         ops: 0,
         strokes: 0,
@@ -89,6 +103,7 @@ export class KlrPlayer {
         hashChecks: 0,
         hashMismatches: [],
         startMismatch: false,
+        skipped: 0,
     };
 
     private brush(): TKlrBrush {
@@ -162,6 +177,103 @@ export class KlrPlayer {
         this.klCanvas.updateViaComposed(before, this.klHistory.getComposed());
     }
 
+    private checkHashes(hashes: number[], at: 'restore' | 'end'): void {
+        if (!hashes.length || this.file.head.hashTile !== KLR_HASH_TILE) {
+            return; // not taken (sealed during a stroke), or on tiles this build doesn't hash
+        }
+        this.result.hashChecks++;
+        const now = this.getLayerHashes();
+        const differ = now.map((h, i) => (h === hashes[i] ? -1 : i)).filter((i) => i >= 0);
+        if (differ.length || now.length !== hashes.length) {
+            this.result.hashMismatches.push({ chunk: this.chunkIndex, at, layers: differ });
+        }
+    }
+
+    // what the brush UIs and the easel did with the stroke, one sample at a time
+    private strokeOp(op: Extract<TKlrOp, { op: 'stroke' }>): void {
+        const id = this.brushId;
+        const xy = (v: number) => v / COORD_SCALE;
+        klRandomSeed(op.seed);
+        const brush = this.bindBrush();
+        let k = 0;
+        const transfers = () => {
+            while (k < op.transfers.length && op.transfers[k] <= given) {
+                brush.transferToCanvas?.();
+                k++;
+            }
+        };
+        const [s0, ...rest] = op.samples;
+        brushDown(id, brush, xy(s0[1]), xy(s0[2]), s0[3] / 255);
+        let given = 1;
+        transfers();
+        for (const s of rest) {
+            brushMove(id, brush, xy(s[1]), xy(s[2]), s[3] / 255);
+            given++;
+            transfers();
+        }
+        while (k < op.transfers.length) {
+            brush.transferToCanvas?.();
+            k++;
+        }
+        brushUp(id, brush);
+        this.result.strokes++;
+    }
+
+    // a KlCanvas call from its named fields
+    private canvasOp(method: string, f: Record<string, TKlrValue>): void {
+        const kc = this.klCanvas as any;
+        const a = f as Record<string, any>;
+        switch (method) {
+            case 'setOpacity':
+                return kc.setOpacity(a.layerIndex, a.opacity);
+            case 'setLayerIsVisible':
+                return kc.setLayerIsVisible(a.layerIndex, a.isVisible);
+            case 'setLayerHasClipping':
+                return kc.setLayerHasClipping(a.layerIndex, a.hasClipping);
+            case 'moveLayer':
+                return kc.moveLayer(a.index, a.delta);
+            case 'mergeLayer':
+                return kc.mergeLayer(a.layerIndex, a.mixModeStr);
+            case 'removeLayer':
+                return kc.removeLayer(a.index);
+            case 'duplicateLayer':
+                return kc.duplicateLayer(a.srcIndex);
+            case 'renameLayer':
+                return kc.renameLayer(a.index, a.name);
+            case 'setMixMode':
+                return kc.setMixMode(a.layerIndex, a.mixModeStr);
+            case 'addLayer':
+                return kc.addLayer(a.selectedIndex, a.data);
+            case 'reset':
+                return kc.reset(a.p);
+            case 'resize':
+                return kc.resize(a.w, a.h, a.algorithm);
+            case 'cropExtend':
+                return kc.cropExtend(a.p);
+            case 'mergeAll':
+                return kc.mergeAll();
+            case 'rotate':
+                return kc.rotate(a.deg);
+            case 'flip':
+                return kc.flip(a.isHorizontal, a.isVertical, a.layerIndex);
+            case 'layerFill':
+                return kc.layerFill(a.layerIndex, a.colorObj, a.compositeOperation, a.doClipSelection);
+            case 'floodFill':
+                return kc.floodFill(a.layerIndex, a.x, a.y, a.rgb, a.opacity, a.tolerance, a.sampleStr, a.grow, a.isContiguous);
+            case 'drawShape':
+                return kc.drawShape(a.layerIndex, a.shapeObj);
+            case 'drawGradient':
+                return kc.drawGradient(a.layerIndex, a.gradientObj);
+            case 'text':
+                return kc.text(a.layerIndex, a.p);
+            case 'eraseLayer':
+                return kc.eraseLayer(a.p);
+            case 'setSelection':
+                return kc.setSelection(a.selection);
+        }
+        throw new Error('klr: no player mapping for ' + method);
+    }
+
     private exec(op: TKlrOp): void {
         const kc = this.klCanvas;
         switch (op.op) {
@@ -172,27 +284,16 @@ export class KlrPlayer {
             case 'layer':
                 this.brushLayer = op.index;
                 return;
-            case 'down':
-                klRandomSeed(op.seed);
-                brushDown(this.brushId, this.bindBrush(), op.x, op.y, op.p);
-                this.result.strokes++;
-                return;
-            case 'move':
-                brushMove(this.brushId, this.brush(), op.x, op.y, op.p);
-                return;
-            case 'up':
-                brushUp(this.brushId, this.brush());
+            case 'stroke':
+                this.strokeOp(op);
                 return;
             case 'line':
                 klRandomSeed(op.seed);
                 this.bindBrush().drawLineSegment(op.x0, op.y0, op.x1, op.y1);
                 this.result.strokes++;
                 return;
-            case 'transfer':
-                this.brush().transferToCanvas?.();
-                return;
             case 'canvas':
-                (kc as any)[op.method](...op.args);
+                this.canvasOp(op.method, op.fields);
                 return;
             case 'filter': {
                 importFilters();
@@ -230,14 +331,29 @@ export class KlrPlayer {
                 if (!selectionSample) {
                     throw new Error('klr: no selection sample ' + op.sample);
                 }
+                const f = op.params as Record<string, any>;
                 if (op.op === 'xform') {
-                    klCanvasTransform({ ...(op.params as any), klCanvas: kc, selectionSample });
+                    klCanvasTransform({
+                        klCanvas: kc,
+                        selectionSample,
+                        selection: f.selection,
+                        freeTransform: f.freeTransform,
+                        eraseLayerIndex: f.eraseLayerIndex,
+                        targetLayerIndex: f.targetLayerIndex,
+                        algorithm: f.algorithm,
+                        backgroundIsTransparent: f.backgroundIsTransparent,
+                    });
                 } else {
                     this.ffdRenderer ??= new FfdRenderer();
                     klCanvasFfd({
-                        ...(op.params as any),
                         klCanvas: kc,
                         selectionSample,
+                        selection: f.selection,
+                        ffd: f.ffd,
+                        eraseLayerIndex: f.eraseLayerIndex,
+                        targetLayerIndex: f.targetLayerIndex,
+                        algorithm: f.algorithm,
+                        backgroundIsTransparent: f.backgroundIsTransparent,
                         ffdRenderer: this.ffdRenderer,
                     });
                 }
@@ -251,31 +367,19 @@ export class KlrPlayer {
                 if (!clip) {
                     throw new Error('klr: no clipboard image ' + op.id);
                 }
-                pasteAsLayer(kc, clip, op.params as TKlrPasteParams);
+                const f = op.params as Record<string, any>;
+                pasteAsLayer(kc, clip, { name: f.name, transform: f.transform, isPixelated: f.isPixelated });
                 return;
             }
             case 'tiles':
                 this.applyTiles(op.tiles);
                 return;
-            case 'restore':
-            case 'hash': {
-                this.result.hashChecks++;
-                const now = this.getLayerHashes();
-                const differ = now
-                    .map((h, i) => (h === op.hashes[i] ? -1 : i))
-                    .filter((i) => i >= 0);
-                if (differ.length || now.length !== op.hashes.length) {
-                    this.result.hashMismatches.push({ chunk: this.chunkIndex, layers: differ });
-                }
-                if (op.op === 'restore') {
-                    this.restart();
-                }
-                return;
-            }
+            case 'ext':
+                return; // no codes yet
         }
     }
 
-    // RESTORE: the page reloaded and opened its draft, with a fresh history, fresh brushes, an
+    // a chunk that starts on a restore: the page reloaded and opened its draft, with a fresh history, fresh brushes, an
     // empty clipboard, from the picture as it was
     private restart(): void {
         // as the draft holds it: the history's tiles and layer attributes (embed-draft.ts)
@@ -314,6 +418,9 @@ export class KlrPlayer {
         // software canvases, as the recording app had (layer-context.ts)
         softwareCanvases();
         this.file = parseKlr(bytes);
+        if (this.file.error) {
+            this.result.error = this.file.error;
+        }
         const project = p.project ?? blankStartProject(this.file.head);
         this.klHistory = new KlHistory({ oldest: projectToComposed(project) });
         this.klCanvas = new KlCanvas(this.klHistory, -1);
@@ -338,14 +445,24 @@ export class KlrPlayer {
     /** Runs the next op. False at the end. */
     step(): boolean {
         while (this.chunkIndex < this.file.chunks.length) {
-            const ops = this.file.chunks[this.chunkIndex].ops;
-            if (this.opIndex < ops.length) {
-                this.exec(ops[this.opIndex++]);
+            const chunk = this.file.chunks[this.chunkIndex];
+            if (this.opIndex === 0 && !this.chunkStarted) {
+                this.chunkStarted = true;
+                this.result.skipped += chunk.skipped;
+                if (chunk.restore) {
+                    this.checkHashes(chunk.restore, 'restore');
+                    this.restart();
+                }
+            }
+            if (this.opIndex < chunk.ops.length) {
+                this.exec(chunk.ops[this.opIndex++]);
                 this.result.ops++;
                 return true;
             }
+            this.checkHashes(chunk.endHashes, 'end');
             this.chunkIndex++;
             this.opIndex = 0;
+            this.chunkStarted = false;
         }
         return false;
     }

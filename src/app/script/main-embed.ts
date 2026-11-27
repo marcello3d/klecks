@@ -15,8 +15,9 @@ import { TKlrStart } from './klr/klr-format';
 import { isLayerFill } from './klecks/kl-types';
 import { softwareCanvases } from './klecks/canvas/layer-context';
 
-// a project of plain fills is a blank start the .klr describes itself
-function klrStartOf(project: TKlEmbedProject, url: string | undefined): TKlrStart {
+// a project of plain fills is a blank start the .klr describes itself; anything else is the
+// previous version's PSD, which 2draw hands the player (the .klr holds no URL)
+function klrStartOf(project: TKlEmbedProject): TKlrStart {
     if (project.layers.every((layer) => isLayerFill(layer.image as any))) {
         return {
             kind: 'blank',
@@ -30,7 +31,7 @@ function klrStartOf(project: TKlEmbedProject, url: string | undefined): TKlrStar
             })),
         };
     }
-    return { kind: 'reference', url: url ?? '' };
+    return { kind: 'reference' };
 }
 
 initIconCss();
@@ -51,9 +52,6 @@ export type TEmbedParams = {
     // getRecording() gives the MP4s. Browsers without an H.264 VideoEncoder don't record.
     // 'klr': an input recording instead (klr/klr-recorder.ts), from getKlr()/getKlrChunks().
     recording?: boolean | 'klr';
-    // the URL of the picture the session starts from (the previous version's PSD), when it is
-    // not blank: a .klr names its start
-    klrStartUrl?: string;
     // No images from outside Klecks: system-clipboard paste, drag and drop and image import
     // are off, with a note; copy and paste inside Klecks go through an in-memory clipboard.
     // Default: on with recording 'klr' (the recording holds no outside pixels), else off.
@@ -134,8 +132,8 @@ export class Embed {
                         // a draft without one (tiles-1, or recorded without 'klr'): a new
                         // recording from the restored picture
                         start: this.restoredDraft
-                            ? { kind: 'reference', url: this.p.klrStartUrl ?? '' }
-                            : klrStartOf(embedProject, this.p.klrStartUrl),
+                            ? { kind: 'reference' }
+                            : klrStartOf(embedProject),
                         restored: restoredKlr,
                     });
                 } catch (e) {
@@ -261,7 +259,8 @@ export class Embed {
         return this.klr ? this.klr.getBytes() : null;
     }
 
-    // head + sealed chunks + the open one, concatenated they are the .klr (for drafts)
+    // head + sealed chunks, concatenated they are the .klr so far (the open chunk's ops are
+    // coded when it is sealed: getKlr() seals)
     getKlrChunks(): TKlrChunks | null {
         return this.klr ? this.klr.getChunks() : null;
     }

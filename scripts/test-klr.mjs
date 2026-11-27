@@ -9,7 +9,7 @@
 //    and every op type: fills, shapes, gradient, text, filters, selection, select transform and
 //    warp, every layer op, canvas resize and crop, in-app copy and paste, undo and redo. Replay
 //    the .klr in a fresh page with only the headless player: every layer's hash equals the live
-//    one, every chunk's HASH matched, the catch-all never fired.
+//    one, every chunk's end hashes matched, the catch-all never fired.
 // 2. Outside images are refused: a pasted file, a dropped file, the paste button with nothing
 //    copied in Klecks.
 // Coder unit tests: node --test scripts/test-klr-unit.mjs
@@ -20,7 +20,7 @@ import http from 'node:http';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { CHUNK_OPS, encodeChunk, KlrOpsWriter, parseKlr } from '../src/app/script/klr/klr-format.ts';
+import { encodeOpsChunk, parseKlr } from '../src/app/script/klr/klr-format.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -137,13 +137,13 @@ async function drive(page) {
         };
         const BRUSHES = ['penBrush', 'blendBrush', 'sketchyBrush', 'pixelBrush', 'chemyBrush', 'smudgeBrush', 'eraserBrush'];
         const done = [];
-        // a sealed chunk (with its HASH) per group: a mismatch names the group, and the chunks
+        // a sealed chunk (with its end hashes) per group: a mismatch names the group, and the chunks
         // after it show they decode on their own
         const push = done.push.bind(done);
         const chunkNames = [];
         done.push = (name) => {
             if (klecks.embed.klr.seal()) chunkNames.push(name);
-            else if (klecks.getKlrChunks().open) throw new Error('could not seal after ' + name);
+            else if (klecks.getKlrInfo().openOps) throw new Error('could not seal after ' + name);
             return DEBUG && name.includes('#') ? done.length : push(name);
         };
         done.push('mouse strokes');
@@ -261,16 +261,16 @@ async function drive(page) {
     }, { DEBUG: !!process.env.KLR_DEBUG, UNTIL: process.env.KLR_UNTIL });
 }
 
-// bytes the strokes take: the stroke ops of each chunk encoded on their own
+// bytes the strokes take: the stroke ops of each chunk (with their brush and layer ops) coded
+// on their own, without the hashes; and how many samples there are
 function strokeBytes(file) {
     let bytes = 0;
     for (const chunk of file.chunks) {
-        const w = new KlrOpsWriter(0);
-        for (const op of chunk.ops) if (['brush', 'layer', 'down', 'move', 'up', 'line', 'transfer'].includes(op.op)) w.write(op, op.t);
-        bytes += encodeChunk(CHUNK_OPS, w.bytes()).length;
+        bytes += encodeOpsChunk({ startMs: 0, ops: chunk.ops.filter((op) => ['brush', 'layer', 'stroke', 'line'].includes(op.op)), endHashes: [] }).length;
     }
     return bytes;
 }
+const sampleCount = (file) => file.chunks.flatMap((c) => c.ops).reduce((n, op) => n + (op.op === 'stroke' ? op.samples.length : 0), 0);
 
 for (const name of browsers) {
     console.log(name);
@@ -295,12 +295,14 @@ for (const name of browsers) {
         const ops = file.chunks.flatMap((c) => c.ops);
         const counts = {};
         for (const op of ops) counts[op.op === 'canvas' ? op.method : op.op] = (counts[op.op === 'canvas' ? op.method : op.op] ?? 0) + 1;
-        const lastHash = ops.filter((o) => o.op === 'hash').at(-1);
-        assert.deepEqual(lastHash.hashes, live, 'the last HASH is the live picture');
+        assert.equal(file.error, undefined, 'the file reads to its end');
+        assert.deepEqual(file.chunks.at(-1).endHashes, live, 'the last chunk\'s end hashes are the live picture');
+        assert.ok(file.chunks.every((c) => c.endHashes.length), 'every chunk has its end hashes');
+        assert.ok(ops.some((o) => o.op === 'stroke' && o.transfers.length), 'no stroke with transfers');
         assert.equal(info.catchAll, 0, 'catch-all fired');
         assert.equal(info.unencodable, 0, 'an op did not encode');
         assert.equal(counts.tiles ?? 0, 0);
-        if (!process.env.KLR_UNTIL) for (const op of ['down', 'move', 'up', 'line', 'transfer', 'brush', 'layer', 'filter', 'undo', 'redo', 'active', 'sample', 'xform', 'ffd', 'copy', 'paste', 'hash', 'floodFill', 'layerFill', 'eraseLayer', 'drawShape', 'drawGradient', 'text', 'addLayer', 'duplicateLayer', 'removeLayer', 'renameLayer', 'setOpacity', 'setLayerIsVisible', 'setLayerHasClipping', 'setMixMode', 'moveLayer', 'mergeLayer', 'mergeAll', 'resize', 'cropExtend', 'setSelection']) {
+        if (!process.env.KLR_UNTIL) for (const op of ['stroke', 'line', 'brush', 'layer', 'filter', 'undo', 'redo', 'active', 'sample', 'xform', 'ffd', 'copy', 'paste', 'floodFill', 'layerFill', 'eraseLayer', 'drawShape', 'drawGradient', 'text', 'addLayer', 'duplicateLayer', 'removeLayer', 'renameLayer', 'setOpacity', 'setLayerIsVisible', 'setLayerHasClipping', 'setMixMode', 'moveLayer', 'mergeLayer', 'mergeAll', 'resize', 'cropExtend', 'setSelection']) {
             assert.ok(counts[op] > 0, 'no ' + op + ' op');
         }
         const brushes = new Set(ops.filter((o) => o.op === 'brush').map((o) => o.brush));
@@ -316,13 +318,15 @@ for (const name of browsers) {
             const c = replay.hashMismatches[0].chunk;
             console.log('first mismatch in', groups[c], JSON.stringify(file.chunks[c].ops.filter((o) => o.op !== 'move').slice(0, 40)));
         }
-        assert.deepEqual(replay.hashMismatches.map((m) => ({ ...m, group: groups[m.chunk] })).slice(0, 5), [], 'chunk HASH mismatches');
+        assert.equal(replay.error, undefined);
+        assert.deepEqual(replay.hashMismatches.map((m) => ({ ...m, group: groups[m.chunk] })).slice(0, 5), [], 'chunk hash mismatches');
         assert.deepEqual(replay.hashes, live, 'per-layer hashes, replay vs live');
         const sb = strokeBytes(file);
+        const ns = sampleCount(file);
         return (
-            `${done.length} groups, ${info.strokes} strokes, ${info.ops} ops, ${file.chunks.length} chunks, ` +
-            `${bytes.length} B (${(bytes.length / info.strokes).toFixed(1)} B/stroke all in, ` +
-            `${(sb / info.strokes).toFixed(1)} B/stroke strokes only), replay ${Math.round(replay.ms)} ms, ` +
+            `${done.length} groups, ${info.strokes} strokes, ${ns} samples, ${info.ops} ops, ${file.chunks.length} chunks, ` +
+            `${bytes.length} B (${(bytes.length / info.strokes).toFixed(1)} B/stroke and ${(bytes.length / ns).toFixed(2)} B/sample all in, ` +
+            `${(sb / info.strokes).toFixed(1)} B/stroke and ${(sb / ns).toFixed(2)} B/sample strokes only), replay ${Math.round(replay.ms)} ms, ` +
             `${Math.round(replay.strokes / (replay.ms / 1000))} strokes/s, ${replay.hashChecks} chunk hashes matched`
         );
     });

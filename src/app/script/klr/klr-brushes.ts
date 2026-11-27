@@ -6,84 +6,14 @@
 import { BRUSHES } from '../klecks/brushes/brushes';
 import { KlHistory } from '../klecks/history/kl-history';
 import { TKlCanvasLayer } from '../klecks/canvas/kl-canvas';
-import { TKlrBrushId, TKlrValue } from './klr-format';
+import { BRUSH_FIELDS, TKlrBrushId, TKlrValue } from './klr-format';
 
-// [field, setter]: restored by assigning the field, or, where the brush derives state from it
-// (pen's alpha canvas, colour strings), by its setter. Not by setters in general: some
-// transform the value (sketchy's setSize doubles it). Append only; a removed field stays
-// readable by being ignored.
-type TField = [string, string?];
-export const BRUSH_FIELDS: Record<TKlrBrushId, TField[]> = {
-    penBrush: [
-        ['settingSize'],
-        ['settingSpacing'],
-        ['settingOpacity'],
-        ['settingScatter'],
-        ['settingColor', 'setColor'],
-        ['settingAlphaId', 'setAlpha'],
-        ['settingLockLayerAlpha'],
-        ['settingHasSizePressure'],
-        ['settingHasOpacityPressure'],
-        ['settingHasScatterPressure'],
-    ],
-    blendBrush: [
-        ['size'],
-        ['opacity'],
-        ['blending'],
-        ['color'],
-        ['settingLockLayerAlpha'],
-        ['settingSizePressure'],
-        ['settingOpacityPressure'],
-    ],
-    sketchyBrush: [
-        ['settingSize'],
-        ['settingOpacity'],
-        ['settingBlending'],
-        ['settingScale'],
-        ['settingColor'],
-        // advances with every segment and lives across strokes
-        ['sketchySeed'],
-    ],
-    pixelBrush: [
-        ['settingSize'],
-        ['settingSpacing'],
-        ['settingOpacity'],
-        ['settingColor', 'setColor'],
-        ['settingLockLayerAlpha'],
-        ['settingIsEraser'],
-        ['settingHasSizePressure'],
-        ['settingPattern'],
-        ['settingTip'],
-    ],
-    chemyBrush: [
-        ['settingSize'],
-        ['settingOpacity'],
-        ['settingColor'],
-        ['settingLockLayerAlpha'],
-        ['settingIsEraser'],
-        ['settingMode'],
-        ['settingDistort'],
-        ['settingXSymmetry'],
-        ['settingYSymmetry'],
-        ['settingGradient'],
-    ],
-    smudgeBrush: [
-        ['settingSize'],
-        ['settingSpacing'],
-        ['settingOpacity'],
-        ['settingColor'],
-        ['settingLockLayerAlpha'],
-        ['settingHasSizePressure'],
-        ['settingHasOpacityPressure'],
-    ],
-    eraserBrush: [
-        ['size'],
-        ['spacing'],
-        ['opacity'],
-        ['useSizePressure'],
-        ['useOpacityPressure'],
-        ['isTransparentBG'],
-    ],
+// Restored by assigning the field, or, where the brush derives state from it (pen's alpha
+// canvas, colour strings), by its setter. Not by setters in general: some transform the value
+// (sketchy's setSize doubles it). The fields themselves: BRUSH_FIELDS (klr-format.ts).
+const SETTERS: Partial<Record<TKlrBrushId, Record<string, string>>> = {
+    penBrush: { settingColor: 'setColor', settingAlphaId: 'setAlpha' },
+    pixelBrush: { settingColor: 'setColor' },
 };
 
 export type TKlrBrush = any; // the brush classes share no interface
@@ -121,7 +51,7 @@ function copyValue(v: unknown): TKlrValue {
 
 export function readBrushSettings(id: TKlrBrushId, brush: TKlrBrush): Record<string, TKlrValue> {
     const out: Record<string, TKlrValue> = {};
-    for (const [field] of BRUSH_FIELDS[id]) {
+    for (const field of BRUSH_FIELDS[id]) {
         out[field] = copyValue(brush[field]);
     }
     return out;
@@ -149,10 +79,11 @@ export function applyBrushSettings(
     brush: TKlrBrush,
     settings: Record<string, TKlrValue>,
 ): void {
-    for (const [field, setter] of BRUSH_FIELDS[id]) {
+    for (const field of BRUSH_FIELDS[id]) {
         if (!(field in settings)) {
             continue;
         }
+        const setter = SETTERS[id]?.[field];
         const value = copyValue(settings[field]);
         if (setter && typeof brush[setter] === 'function') {
             brush[setter](value);

@@ -4,10 +4,10 @@
 //
 //   node scripts/test-klr-draft.mjs [--build] [--measure] [chromium|webkit ...]
 //
-// 1. Draw; a checkpoint comes by itself after CHECKPOINT_CHANGES changes; reload right after a
-//    checkpoint and between two (the tail holding unsealed work): the restored picture is the
-//    checkpoint's, exactly; keep drawing; the submitted .klr replays in a fresh page to the
-//    final live hashes, RESTORE checks included.
+// 1. Draw; a checkpoint comes by itself after CHECKPOINT_CHANGES changes and seals the
+//    recording (the draft holds no open chunk); reload right after a checkpoint and between two:
+//    the restored picture is the checkpoint's, exactly; keep drawing; the submitted .klr replays
+//    in a fresh page to the final live hashes, the restore chunks' checks included.
 // 2. The klecks-tiles-1 fixtures of 2draw.net (worker/test/fixtures/drafts/kleki, read only)
 //    open to their expected.png and save on as tiles-2.
 // 3. A tiles-1 draft with an MP4 recording's video pieces opens under recording: 'klr' and
@@ -128,7 +128,7 @@ async function draw(page, n, { seed = 1, restEvery = 0, restMs = 900 } = {}) {
     );
 }
 
-const state = (page) => page.evaluate(() => ({ ...draftState, tail: undefined, klrOpen: !!draftState.tail?.klr?.open, klrPieces: draftState.tail?.klr?.pieces.length ?? 0, format: draftState.tail?.format, info: klecks.getDraftInfo(), klr: klecks.getKlrInfo() }));
+const state = (page) => page.evaluate(() => ({ ...draftState, tail: undefined, klrOpen: 'open' in (draftState.tail?.klr ?? {}), klrV: draftState.tail?.klr?.v, klrPieces: draftState.tail?.klr?.pieces.length ?? 0, format: draftState.tail?.format, info: klecks.getDraftInfo(), klr: klecks.getKlrInfo() }));
 const hashes = (page) => page.evaluate(() => liveHashes());
 
 async function replayFresh(context, base64) {
@@ -177,7 +177,9 @@ for (const name of browsers) {
         let st = await state(page);
         assert.ok(st.saves >= 1, 'no checkpoint after 52 strokes');
         assert.equal(st.format, 'klecks-tiles-2');
-        assert.ok(st.klrOpen, 'the open chunk rides in the tail');
+        assert.equal(st.klrOpen, false, 'no open chunk in the tail');
+        assert.equal(st.klrV, 2);
+        assert.ok(st.klrPieces >= 1, 'the checkpoint sealed a chunk');
         const auto = st.saves;
 
         // reload right after a checkpoint
@@ -197,22 +199,24 @@ for (const name of browsers) {
         }
         await reload(page);
         assert.deepEqual(await hashes(page), h1, 'restored right after a checkpoint');
-        {
-            // the restored recording: the draft's, then RESTORE with the restored picture
-            const now = parseKlr(new Uint8Array(Buffer.from(await page.evaluate(() => klrDraftBase64()), 'base64')));
-            const before = parseKlr(new Uint8Array(Buffer.from(part1, 'base64')));
-            assert.deepEqual(now.chunks[0].ops, before.chunks[0].ops, 'chunk 0 kept as it was');
-            assert.deepEqual({ op: now.chunks[1].ops[0].op, hashes: now.chunks[1].ops[0].hashes }, { op: 'restore', hashes: h1 }, 'RESTORE holds the restored picture');
-        }
 
         // keep drawing, a checkpoint, more drawing that isn't saved, reload
         await draw(page, 12, { seed: 7 });
+        {
+            // the restored recording: the draft's chunks as they were, then a chunk that starts
+            // on a restore, with the restored picture's hashes
+            const now = parseKlr(new Uint8Array(Buffer.from(await page.evaluate(() => klrDraftBase64()), 'base64')));
+            const before = parseKlr(new Uint8Array(Buffer.from(part1, 'base64')));
+            assert.deepEqual(now.chunks.slice(0, before.chunks.length), before.chunks, 'the draft\'s chunks kept as they were');
+            assert.deepEqual(now.chunks[before.chunks.length].restore, h1, 'the restore chunk holds the restored picture');
+            assert.ok(before.chunks.every((c) => !c.restore));
+        }
         await page.evaluate(() => { api.copy(); api.paste({ transform: { x: 600, y: 450, width: 500, height: 400, angleDeg: 8 } }); });
         await draw(page, 3, { seed: 8 });
         await page.evaluate(() => flushDraft());
         const h2 = await hashes(page);
         st = await state(page);
-        assert.ok(st.klrOpen, 'unsealed work in the tail');
+        assert.equal(st.klrOpen, false, 'no open chunk in the tail');
         await draw(page, 8, { seed: 9 }); // between checkpoints: lost with the reload
         assert.notDeepEqual(await hashes(page), h2);
         await reload(page);
@@ -231,12 +235,14 @@ for (const name of browsers) {
         await context.close();
 
         const file = parseKlr(new Uint8Array(Buffer.from(base64, 'base64')));
-        const restores = file.chunks.flatMap((c) => c.ops).filter((o) => o.op === 'restore').length;
-        assert.equal(restores, 2, 'a RESTORE per reload');
+        const restores = file.chunks.filter((c) => c.restore).length;
+        assert.equal(restores, 2, 'a restore chunk per reload');
+        assert.equal(file.error, undefined);
         assert.equal(klrInfo.catchAll, 0, 'catch-all fired');
         const replay = await replayFresh(await browser.newContext(), base64);
         assert.equal(replay.startMismatch, false);
-        assert.deepEqual(replay.hashMismatches, [], 'HASH / RESTORE mismatches');
+        assert.equal(replay.error, undefined);
+        assert.deepEqual(replay.hashMismatches, [], 'end / restore hash mismatches');
         assert.deepEqual(replay.hashes, final, 'replay vs final live');
         return `${auto} checkpoint(s) by itself, ${file.chunks.length} chunks, ${restores} restores, ${replay.hashChecks} hash checks, ${base64.length * 3 / 4 | 0} B .klr`;
     });
@@ -346,6 +352,7 @@ for (const name of browsers) {
                     `draft ${(st.bytes / 1024).toFixed(0)} kB in ${st.pieces} pieces + tail ${(st.tailBytes / 1024).toFixed(1)} kB ` +
                     `(${i.klrPieces} .klr pieces, .klr ${(st.klr.bytes / 1024).toFixed(1)} kB); ` +
                     `${i.checkpoints} checkpoints, last ${i.lastMs.toFixed(1)} ms, max ${i.maxMs.toFixed(1)} ms main thread; ` +
+                    `of which the seal (hashes + coding) last ${st.klr.sealMs.toFixed(1)} ms, max ${st.klr.sealMaxMs.toFixed(1)} ms; ` +
                     `restore ${restored.toFixed(0)} ms; hash tiles read ${st.klr.hashTilesRead}`
                 );
             });

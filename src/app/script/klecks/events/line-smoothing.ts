@@ -91,4 +91,8 @@ export class LineSmoothing {
     setSmoothing(s: number): void {
         this.smoothing = BB.clamp(s, 0, 1);
     }
+
+    getSmoothing(): number {
+        return this.smoothing;
+    }
 }

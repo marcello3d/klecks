@@ -118,10 +118,10 @@
         window.klrBase64 = () => b64(klecks.getKlr());
         // frame intervals while something runs: rAF timestamps and long tasks
         window.frames = { start() { this.t = []; this.long = []; this.on = true; const loop = (t) => { if (!this.on) return; this.t.push(t); requestAnimationFrame(loop); }; requestAnimationFrame(loop); try { this.obs = new PerformanceObserver((l) => l.getEntries().forEach((e) => this.long.push(e.duration))); this.obs.observe({ entryTypes: ['longtask'] }); } catch (e) {} }, stop() { this.on = false; this.obs?.disconnect(); const d = []; for (let i = 1; i < this.t.length; i++) d.push(this.t[i] - this.t[i - 1]); d.sort((a, b) => a - b); const q = (p) => d[Math.min(d.length - 1, Math.floor(p * d.length))]; return { frames: d.length, p50: q(0.5), p95: q(0.95), max: d.at(-1), over20: d.filter((x) => x > 20).length, over33: d.filter((x) => x > 33.4).length, longTasks: this.long.length, longMax: Math.max(0, ...this.long) }; } };
-        // what a draft would keep of the recording right now, as one .klr (no sealing)
+        // what a draft would keep of the recording right now, as one .klr (it seals, as a checkpoint does)
         window.klrDraftBase64 = () => {
             const st = klecks.embed.klr.getDraftState();
-            const parts = [st.head, ...st.sealed, ...(st.open ? [st.open] : [])];
+            const parts = [st.head, ...st.sealed];
             const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
             let o = 0;
             for (const p of parts) { out.set(p, o); o += p.length; }

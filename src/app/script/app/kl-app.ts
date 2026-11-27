@@ -2468,6 +2468,13 @@ export class KlApp {
             getBrush: () => currentBrushUi.getBrush(),
             getLayerIndex: () => currentLayerIndex,
             isDrawing: () => this.isDrawing(),
+            // smoothed strokes are on no pointer lattice; nor are those in a rotated view
+            getGrid: () => {
+                const t = this.easel.getTransform();
+                return lineSmoothing.getSmoothing() > 0 || t.angleDeg % 360 !== 0
+                    ? null
+                    : { scale: t.scale, dpr: window.devicePixelRatio || 1 };
+            },
             // the paths the UI takes, for drivers and tests
             chainIn: (e) => drawEventChain.chainIn(e as any),
             setBrush: (id) => brushTabRow.open(id),

@@ -42,12 +42,14 @@ import {
  * aren't used anymore, the next save starts over (fresh) with the live ones.
  *
  * Format 'klecks-tiles-2' (written since the .klr recording; tiles-1 is still read, forever):
- * tiles-1 plus, with recording: 'klr' (klr/klr-recorder.ts), TTail.klr: the recording's HEAD,
- * its sealed OPS chunks as pieces of their own (one each), and the open chunk in the tail. Saves
- * are checkpoints: in a quiet gap, every CHECKPOINT_MS or CHECKPOINT_CHANGES picture changes,
- * whichever comes first, and on flush. The tiles and the recording in a save are taken at the
+ * tiles-1 plus, with recording: 'klr' (klr/klr-recorder.ts), TTail.klr: the recording's HEAD and
+ * its sealed chunks as pieces of their own (one each, an OPS chunk with its TILES chunk if any).
+ * Saves are checkpoints: in a quiet gap, every CHECKPOINT_MS or CHECKPOINT_CHANGES picture
+ * changes, whichever comes first, and on flush. Every checkpoint seals the recording's open
+ * chunk, so a draft holds no open chunk. The tiles and the recording in a save are taken at the
  * same moment, so a restored draft and its recording agree: the picture opens from the tiles
- * (never by replay) with a fresh undo history, and the recording goes on with a RESTORE op.
+ * (never by replay) with a fresh undo history, and the recording goes on with a chunk that
+ * starts on a restore (its header holds the restored picture's hashes).
  * A tiles-1 draft's video pieces are dropped under recording: 'klr' (no timelapse).
  */
 
@@ -115,11 +117,11 @@ type TTail = {
     klr?: TKlrTail; // tiles-2
 };
 
+// v 2: .klr v0, sealed chunks only (v 1 carried an open chunk of the interim coding: dropped)
 type TKlrTail = {
-    v: 1;
+    v: 2;
     head: string; // base64: magic + HEAD chunk
-    pieces: number[]; // the sealed OPS chunks, one piece each, in order
-    open: string | null; // base64: the open OPS chunk
+    pieces: number[]; // the sealed chunks, one piece each, in order
     elapsedMs: number;
     seed: number;
     id: number;
@@ -292,13 +294,12 @@ export async function restoreDraft(saved: TEmbedDraftSaved): Promise<TDraftResto
 // starts over (from this picture, as a reference).
 function restoreKlr(klr: TKlrTail, pieces: Uint8Array[]): TKlrDraftState | undefined {
     try {
-        if (klr.v !== 1 || !klr.pieces.every((i) => i >= 0 && i < pieces.length)) {
+        if (klr.v !== 2 || !klr.pieces.every((i) => i >= 0 && i < pieces.length)) {
             throw new Error('bad klr tail');
         }
         return {
             head: base64ToBytes(klr.head),
             sealed: klr.pieces.map((i) => pieces[i].slice()),
-            open: klr.open ? base64ToBytes(klr.open) : null,
             elapsedMs: klr.elapsedMs,
             seed: klr.seed,
             id: klr.id,
@@ -503,7 +504,7 @@ export class EmbedDraft {
         this.busyFrom = performance.now();
         const seq = this.changeSeq;
         const composed = this.klApp.getKlHistory().getComposed();
-        // the recording at the same moment as the picture
+        // the recording at the same moment as the picture (sealed: no open chunk in a draft)
         const klrState = this.klr?.getDraftState();
         const layers = getLayers(composed);
         const fresh = !this.hasCopy || this.compactWanted;
@@ -608,10 +609,9 @@ export class EmbedDraft {
                     append.push(chunk);
                 }
                 klr = {
-                    v: 1,
+                    v: 2,
                     head: bytesToBase64(klrState.head),
                     pieces: klrPieces,
-                    open: klrState.open ? bytesToBase64(klrState.open) : null,
                     elapsedMs: Math.round(klrState.elapsedMs),
                     seed: klrState.seed,
                     id: klrState.id,
@@ -724,7 +724,6 @@ export class EmbedDraft {
             this.pieceSizes = p.restored.pieceSizes;
             if (p.restored.klr && this.klr) {
                 // the recorder continues what the draft holds: its sealed chunks are saved
-                // (the open one, sealed now, goes in with the next save)
                 this.klrPieces = p.restored.klrPieces ?? [];
             }
             // an older format: start over in this one
