@@ -1,5 +1,5 @@
 // Takes the machine's browser-suite turn once (2draw.net's e2e lock) and runs, in it: the .klr
-// unit tests, test-klr.mjs, test-klr-draft.mjs --measure, perf-klr-canvas.mjs.
+// unit tests (and the vendored pen coder's), test-klr.mjs, test-klr-draft.mjs --measure, perf-klr-canvas.mjs.
 //   node scripts/test-klr-all.mjs [--build] [--no-perf]
 import { execSync, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -12,7 +12,7 @@ if (args.includes('--build') || !existsSync(join(root, 'dist/embed.js'))) execSy
 const lockPath = '/Users/marcello/github/2draw.net/worker/scripts/lib/e2e-lock.ts';
 if (existsSync(lockPath) && process.env.E2E_LOCK !== '0') await (await import(lockPath)).e2eLock('klecks test-klr-all', 40);
 const runs = [
-    ['node', ['--test', 'scripts/test-klr-unit.mjs']],
+    ['node', ['--test', 'scripts/test-klr-unit.mjs', 'scripts/test-pen-coder-vendor.mjs']],
     ['node', ['scripts/test-klr.mjs']],
     ['node', ['scripts/test-klr-draft.mjs', '--measure']],
     ...(args.includes('--no-perf') ? [] : [['node', ['scripts/perf-klr-canvas.mjs']]]),

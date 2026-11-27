@@ -1,1 +1,5 @@
 * text=auto eol=lf
+
+# vendored from 2draw.net byte for byte: no line-ending conversion
+src/app/script/klr/pen-coder.ts -text
+src/app/script/klr/pen-coder-vectors-v1.json -text

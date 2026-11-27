@@ -1,0 +1,3 @@
+# vendored from 2draw.net byte for byte (scripts/test-pen-coder-vendor.mjs pins them): never reformat
+src/app/script/klr/pen-coder.ts
+src/app/script/klr/pen-coder-vectors-v1.json

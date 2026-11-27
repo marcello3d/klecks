@@ -37,6 +37,21 @@ a blank canvas or the drawing to continue (`psdUrl`), and on submit the PNG and 
   default with `'klr'`) keeps images from outside Klecks out: copy and paste work through an in-memory clipboard.
   The brushes' random numbers come from a seedable PRNG (`klecks/utils/kl-random.ts`) and `KlHistory` has a push
   observer. See `docs/2draw-klr.md`. Tests: `node --test scripts/test-klr-unit.mjs` and `node scripts/test-klr.mjs`.
+- `src/app/script/klr/pen-coder.ts` and `pen-coder-vectors-v1.json`: 2draw's shared stroke coder and its test
+  vectors, vendored (below).
 - `scripts/build-2draw.mjs` and this file.
+
+## The pen coder (vendored)
+
+`.klr` codes its op stream with the pen coder that Lascaux Pocket's `.lsp` uses. 2draw.net is its source of truth
+(`worker/src/pocket/pen-coder.ts`, `worker/src/pocket/PEN-CODER.md`); this fork carries byte-identical copies:
+`src/app/script/klr/pen-coder.ts` and `src/app/script/klr/pen-coder-vectors-v1.json` (from
+`worker/test/fixtures/pen-coder/vectors-v1.json`). Never edit, reformat or lint them here (`.prettierignore`,
+`.gitattributes` `-text`). `node --test scripts/test-pen-coder-vendor.mjs` checks both against pinned SHA-256s and runs
+every vector both ways; 2draw's `test/pen-coder-vendor.test.ts` compares its file with this checkout's.
+
+To re-vendor: change the coder in 2draw first (with its tests), then copy both files whole over the ones here, update
+`PEN_CODER_SHA256` / `VECTORS_SHA256` and the "copied from" commit in `scripts/test-pen-coder-vendor.mjs`, and commit
+them together, naming the 2draw commit in the message. A fix never starts in this copy.
 
 To take upstream changes, merge bitbof/klecks `main` into this branch.
