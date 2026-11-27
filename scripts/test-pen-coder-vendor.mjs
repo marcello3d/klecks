@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 import * as P from '../src/app/script/klr/pen-coder.ts';
 
 // copied from 2draw.net b596783a
-const PEN_CODER_SHA256 = '727f2bfbc1e5259488cb4bf3178a18f2a8b14f9c8e258866f213eff4d2305dbd';
+const PEN_CODER_SHA256 = 'e2e5f3193549f029538e4f31547459019530f863d7278e5e5a91a13b4f7365cd';
 const VECTORS_SHA256 = 'ab02e4bae1f93f58ed151535b13a2ff703acc34d490320309517f1292b79457b';
 
 const file = (name) => readFileSync(new URL('../src/app/script/klr/' + name, import.meta.url));

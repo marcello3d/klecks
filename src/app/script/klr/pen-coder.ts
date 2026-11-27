@@ -6,7 +6,7 @@
 // it: PEN-CODER.md, next to this file.
 //
 // THIS FILE IS VENDORED. A byte-identical copy lives in the Klecks fork
-// (marcello3d/klecks, src/app/script/klr/pen-coder.ts), which can't import
+// (2draw/klecks, src/app/script/klr/pen-coder.ts), which can't import
 // from 2draw. This one (2draw.net worker/src/pocket/pen-coder.ts) is the
 // source of truth: change it here, then copy it over whole; each side has a
 // test that the copies match (PEN-CODER.md, "Vendoring"). So: no imports, no
