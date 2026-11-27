@@ -93,6 +93,13 @@
                     if (!player.step()) break;
                 }
                 const straightMs = performance.now() - t0;
+                // the checkpoints with only the history the rest of the replay can still undo to
+                let trimmed = 0;
+                for (const m of marks) {
+                    const t = player.trimCheckpoint(m.cp);
+                    if (t !== m.cp) trimmed++;
+                    m.cp = t;
+                }
                 const bad = [];
                 let restoreMs = 0;
                 for (let k = 0; k + 1 < marks.length; k++) {
@@ -136,6 +143,7 @@
                     endSame: q.getLayerHashes(false).join() === player.getLayerHashes(false).join(),
                     endMismatches: end.hashMismatches.length,
                     badPartial,
+                    trimmed,
                     parts,
                     straightMs,
                     restoreMs: restoreMs / Math.max(1, marks.length - 1),

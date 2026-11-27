@@ -17,6 +17,8 @@
  */
 import { KlCanvas } from '../klecks/canvas/kl-canvas';
 import { HISTORY_TILE_SIZE, KlHistory, TKlHistoryState } from '../klecks/history/kl-history';
+import { composeHistoryStateData } from '../klecks/history/compose-history-state-data';
+import { estimateBytes } from '../klecks/history/estimate-bytes';
 import { projectToComposed } from '../klecks/history/push-helpers/project-to-composed';
 import { isHistoryEntryActiveLayerChange } from '../klecks/history/push-helpers/is-history-entry-active-layer-change';
 import { THistoryEntryData, THistoryEntryLayer } from '../klecks/history/history.types';
@@ -205,6 +207,11 @@ function brushState(id: TKlrBrushId, brush: TKlrBrush): Record<string, unknown> 
     return out;
 }
 
+// Every history entry an undo or redo of any player has made the top (entries are shared
+// between a player and its checkpoints, and between players restored from them): what
+// trimCheckpoint must keep.
+const UNDONE_TO = new WeakSet<object>();
+
 export function blankStartProject(head: TKlrHead): TKlProject {
     if (head.start.kind !== 'blank') {
         throw new Error('klr: the start is a reference, pass its project');
@@ -271,6 +278,10 @@ export class KlrPlayer {
             this.klHistory.increaseIndex();
         }
         this.klCanvas.updateViaComposed(before, this.klHistory.getComposed());
+        const top = this.klHistory.getEntries().at(-1);
+        if (top) {
+            UNDONE_TO.add(top);
+        }
     }
 
     private applyTiles(t: TKlrTiles): void {
@@ -792,6 +803,35 @@ export class KlrPlayer {
             hasher: this.hasher,
             ffdRenderer: this.ffdRenderer,
             layers: this.captureLayers(),
+        };
+    }
+
+    /**
+     * `cp` (a checkpoint of this replay, taken earlier) with less of its history: what this player,
+     * at the furthest the replay has been, shows its later ops can still undo to. An undo can
+     * reach only an entry still in the history, so entries of the checkpoint's that this player's
+     * history has since let go of (trimmed from the oldest end, or a history before a restore
+     * chunk or another version's) and that no undo or redo has made the top since, from the
+     * bottom up to the first one still needed, are composed into one oldest entry (the same
+     * picture there; tiles shared, not copied). Only right for a player at the replay's furthest
+     * point. Returns `cp` itself when nothing goes.
+     */
+    trimCheckpoint(cp: TKlrCheckpoint): TKlrCheckpoint {
+        const h = cp.history;
+        const live = new Set<object>(this.klHistory.getState().entries);
+        let k = 0;
+        while (k < h.index && !live.has(h.entries[k]) && !UNDONE_TO.has(h.entries[k])) {
+            k++;
+        }
+        // entries 0..k-1 go: entry k is still needed, as the bottom; compose 0..k-1 into it
+        if (k === 0) {
+            return cp;
+        }
+        const data = composeHistoryStateData(h.entries.slice(0, k + 1).map((e) => e.data));
+        const oldest = { timestamp: h.entries[k].timestamp, memoryEstimateBytes: estimateBytes(data), description: 'oldest', data };
+        return {
+            ...cp,
+            history: { entries: [oldest, ...h.entries.slice(k + 1)], index: h.index - k, composed: h.composed, totalActions: h.totalActions },
         };
     }
 
