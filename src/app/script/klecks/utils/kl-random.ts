@@ -16,3 +16,13 @@ export function klRandom(): number {
 export function klRandomSeed(seed: number): void {
     state = Math.imul(seed >>> 0, 0x9e3779b1) | 0;
 }
+
+// 2draw: the .klr player draws a stroke over several frames (KlrPlayer.strokeTo); another player
+// on the page may use klRandom in between, so a stroke under way keeps its own state
+export function klRandomGetState(): number {
+    return state;
+}
+
+export function klRandomSetState(s: number): void {
+    state = s | 0;
+}

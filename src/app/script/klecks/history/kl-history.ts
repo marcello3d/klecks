@@ -21,6 +21,16 @@ export type TKlHistoryParams = {
     oldest: THistoryEntryDataComposed;
 };
 
+/** 2draw: a history as it stands, for the .klr player's checkpoints (klr-player.ts). The entries
+ * and their data are never changed once pushed (a push or a trim makes new arrays and entries), so
+ * a state shares them with the history it came from. */
+export type TKlHistoryState = {
+    readonly entries: readonly THistoryEntry[];
+    readonly index: number;
+    readonly composed: THistoryEntryDataComposed;
+    readonly totalActions: number;
+};
+
 const HISTORY_DEBUGGING = false;
 
 export class KlHistory {
@@ -168,6 +178,25 @@ export class KlHistory {
 
     canRedo(): boolean {
         return this.index < this.entries.length - 1;
+    }
+
+    // 2draw: the .klr player's checkpoints (TKlHistoryState)
+    getState(): TKlHistoryState {
+        return {
+            entries: this.entries.slice(),
+            index: this.index,
+            composed: this.composed,
+            totalActions: this.totalActions,
+        };
+    }
+
+    static fromState(state: TKlHistoryState): KlHistory {
+        const history = new KlHistory({ oldest: state.composed });
+        history.entries = state.entries.slice();
+        history.index = state.index;
+        history.composed = state.composed;
+        history.totalActions = state.totalActions;
+        return history;
     }
 
     getEntries(): THistoryEntry[] {

@@ -81,6 +81,66 @@
                 const result = player.runAll();
                 return { ...result, hashes: player.getLayerHashes(), hashesFresh: player.getLayerHashes(false) };
             };
+            // seeking: a checkpoint before every op of a straight replay, with the layers' hashes
+            // there; then each restored in a player of its own, which must have those hashes and,
+            // one op on, the next checkpoint's (the straight replay went on past it meanwhile)
+            window.replaySeek = (base64) => {
+                const player = new KlrPlayer(unb64(base64));
+                const marks = [];
+                const t0 = performance.now();
+                for (;;) {
+                    marks.push({ cp: player.checkpoint(), hashes: player.getLayerHashes(false) });
+                    if (!player.step()) break;
+                }
+                const straightMs = performance.now() - t0;
+                const bad = [];
+                let restoreMs = 0;
+                for (let k = 0; k + 1 < marks.length; k++) {
+                    const r0 = performance.now();
+                    const q = new KlrPlayer(marks[k].cp);
+                    restoreMs += performance.now() - r0;
+                    const at = q.getLayerHashes(false).join();
+                    q.step();
+                    const next = q.getLayerHashes(false).join();
+                    if (at !== marks[k].hashes.join() || next !== marks[k + 1].hashes.join()) {
+                        bad.push({ op: k, at: at === marks[k].hashes.join(), next: next === marks[k + 1].hashes.join() });
+                    }
+                    q.getKlCanvas().destroy();
+                }
+                // strokes drawn along their path (strokeTo, a sample time at a time, the way the
+                // view page's player spreads them over frames), with another player's ops in
+                // between: the same layers as the straight replay after every op
+                const c = new KlrPlayer(unb64(base64));
+                const other = new KlrPlayer(unb64(base64));
+                let badPartial = 0, parts = 0;
+                for (let k = 0; ; k++) {
+                    const op = c.nextOp();
+                    if (op && op.op === 'stroke') {
+                        for (const s of op.samples) {
+                            c.strokeTo(s[0]);
+                            parts++;
+                            other.step();
+                        }
+                    }
+                    const more = c.step();
+                    if (marks[k + 1] && c.getLayerHashes(false).join() !== marks[k + 1].hashes.join()) badPartial++;
+                    if (!more) break;
+                }
+                // and the first checkpoint, restored, plays to the end as the straight replay did
+                const q = new KlrPlayer(marks[0].cp);
+                const end = q.runAll();
+                return {
+                    ops: marks.length - 1,
+                    bad: bad.slice(0, 10),
+                    badCount: bad.length,
+                    endSame: q.getLayerHashes(false).join() === player.getLayerHashes(false).join(),
+                    endMismatches: end.hashMismatches.length,
+                    badPartial,
+                    parts,
+                    straightMs,
+                    restoreMs: restoreMs / Math.max(1, marks.length - 1),
+                };
+            };
         });
     } else {
         window.ready = (async () => {

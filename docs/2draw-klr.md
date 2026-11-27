@@ -19,7 +19,8 @@ player checks a hash per chunk and a viewer always ends on the entry's PNG.
 | `src/app/script/klr/klr-hooks.ts` | what the app calls; passes through without a recorder |
 | `src/app/script/klr/klr-recorder.ts` | the live recorder, the catch-all, chunk sealing |
 | `src/app/script/klr/klr-brushes.ts` | brush settings read and restored, how a stroke reaches each brush |
-| `src/app/script/klr/klr-player.ts` | the headless player (KlHistory + KlCanvas + brushes + filters) |
+| `src/app/script/klr/klr-player.ts` | the headless player (KlHistory + KlCanvas + brushes + filters), its checkpoints |
+| `src/app/script/klr/klr-checkpoints.ts` | what a set of checkpoints holds in memory (`KlrCheckpointBytes`) |
 | `src/app/script/klr/klr-paste.ts` | paste as a layer, shared by the app and the player |
 | `src/app/script/klecks/utils/kl-random.ts` | the brushes' seeded PRNG (replaces `Math.random`) |
 | `scripts/test-klr.mjs`, `scripts/test-klr.html` | Chrome and WebKit: record everything, replay in a fresh page |
@@ -89,7 +90,8 @@ text, eraseLayer, setSelection).
 
 Seeds: the recorder reseeds `klRandom` before each stroke and filter, and stores the seed.
 Sketchy keeps its own seed across strokes (`sketchySeed`, a brush setting) and connects to the
-points of earlier strokes, so a player always replays from the start. Quantization happens
+points of earlier strokes, so a player replays from the start, or from a checkpoint of its own
+(below). Quantization happens
 before the live brush sees the event, so the live picture is what the player draws.
 
 The recorder checks and copies each op as it comes (`prepareOp`: the values made plain copies,
@@ -183,16 +185,60 @@ unchanged: format, pieces and tail are opaque to it.
 - `Klecks.loadKlrPlayer()`: the headless `KlrPlayer` (`new KlrPlayer(bytes, { project? })`,
   `runAll()`, `step()`, `getKlCanvas()`, `getLayerHashes()`); its result counts hash checks and
   mismatches (per chunk, at its restore or its end), skipped EXT ops and the `error` that ended
-  reading early, if any.
+  reading early, if any. `checkpoint()` between two steps, and `new KlrPlayer(checkpoint)`
+  carries on from there (seeking, below).
 - `Klecks.features.klr`.
 
 Chunks are sealed at every draft checkpoint, by `getKlr()`, and otherwise in a quiet gap (1.5 s
 without an op, not drawing) once the open one has 100,000 samples, 20,000 ops or a minute.
 Sealing hashes the layers' changed tiles and codes the chunk.
 
+## Seeking: player checkpoints
+
+`KlrPlayer.checkpoint()` keeps the whole player state between two steps: the history
+(`KlHistory.getState()`: its entries, undo entries included, the index, the composed state), each
+brush made so far (its settings as the recorder reads them, then its other plain fields: what
+carries from one stroke or line to the next, as sketchy's seed or a line's last dot), the current
+brush and layer, the selection samples and clipboard images, the chunk and op reached, the
+result so far, the hasher's cache. `new KlrPlayer(checkpoint)` makes a fresh KlHistory
+(`KlHistory.fromState`) and KlCanvas (drawn from the composed tiles, as an undo or a restore
+chunk does) and fresh brushes with that state, and carries on with the same pixels as a replay
+that never stopped. Nothing is copied: history entries, tiles, samples and clips never change once
+made, so a checkpoint shares them with the player and with the other checkpoints, and costs
+what the replay itself has since let go (tiles undone and replaced, trimmed from the oldest end,
+samples and clips of chunks gone by). `KlrCheckpointBytes` counts that: each pixel buffer once
+however many checkpoints hold it (`total()`), and what the others hold beyond one of them
+(`beyond(cp)`). 2draw's KlecksPlayer chooses the spacing and the budget. The format is unchanged.
+
+Two things the history does not hold, found by the test below:
+
+- A canvas does not always read back what putImageData of its readback makes it: pixels a
+  WebGL filter drew (drawImage of its canvas), at low alpha, come back one level apart. So the
+  checkpoint keeps each layer's pixels as its canvas holds them (`TKlrLayerCapture`): a tile is
+  a copy of the canvas's own (drawImage, exact) or, for a fill, the fill if the canvas is exactly
+  that. A tile whose history tile is the same object as at the last checkpoint keeps the same
+  copy (strokes, lines and undo/redo change only tiles they push or put back); after any other
+  op every tile is copied again. A restore draws the copies over the canvas the history made.
+- Pen's image tips (alphaCanvas128/64/32) draw a little differently in Chrome once a stroke has
+  drawn from them than the first time after they were redrawn, though they read back the same.
+  So the player gives the pen new tip canvases before a brush op redraws them (never redrawing
+  in place: the same result, a fresh canvas), and a checkpoint keeps the tips themselves once a
+  stroke has used them (shared; nothing draws into them again), else the restore makes them
+  afresh from the settings.
+
+A stroke can also be drawn along its path: `strokeTo(t)` gives the next op, a stroke, its
+samples up to time `t` (the chunk's clock, as the op's `t`), and the next `step()` gives it the
+rest and lifts the pen. The same brush calls as `step()` alone, spread over frames; klRandom's
+state is kept with the stroke between parts (another player may use it meanwhile). `nextOp()`
+is the op the next step runs.
+
+`node scripts/test-klr.mjs` checks it: a checkpoint before every op of the all-ops session,
+restored in a player of its own, has that op's layer hashes and, one op on, the next one's; the
+session drawn a sample time at a time with strokeTo, another player stepping in between, has
+the straight replay's hashes after every op.
+
 ## Limits and next steps
 
-- The player replays from the start; seeking needs checkpoints (phase 3).
 - Text depends on the fonts the browser has.
 
 ## Measured (2026-11-26, `node scripts/test-klr.mjs`, 1200×900)

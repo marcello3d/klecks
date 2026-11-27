@@ -10,6 +10,9 @@
 //    warp, every layer op, canvas resize and crop, in-app copy and paste, undo and redo. Replay
 //    the .klr in a fresh page with only the headless player: every layer's hash equals the live
 //    one, every chunk's end hashes matched, the catch-all never fired.
+//    Seeking: a checkpoint before every op, restored in a player of its own, has the same layers
+//    and one op on the next one's (KlrPlayer.checkpoint, new KlrPlayer(checkpoint)); strokes
+//    drawn a sample time at a time (strokeTo), another player's ops in between, end the same.
 // 2. Outside images are refused: a pasted file, a dropped file, the paste button with nothing
 //    copied in Klecks.
 // Coder unit tests: node --test scripts/test-klr-unit.mjs
@@ -321,13 +324,24 @@ for (const name of browsers) {
         assert.equal(replay.error, undefined);
         assert.deepEqual(replay.hashMismatches.map((m) => ({ ...m, group: groups[m.chunk] })).slice(0, 5), [], 'chunk hash mismatches');
         assert.deepEqual(replay.hashes, live, 'per-layer hashes, replay vs live');
+        // seeking: a checkpoint before every op restores to the same pixels, and goes on the same
+        const fresh2 = await open(context, '?player');
+        const seek = await fresh2.evaluate((b) => window.replaySeek(b), base64);
+        await fresh2.close();
+        if (process.env.KLR_SAVE) (await import('node:fs')).writeFileSync(process.env.KLR_SAVE, base64);
+        const opName = (k) => (ops[k] ? (ops[k].op === 'canvas' ? ops[k].method : ops[k].op) : 'end');
+        const bad = seek.bad.map((b) => ({ ...b, before: opName(b.op - 1), after: opName(b.op) }));
+        assert.deepEqual({ bad, badCount: seek.badCount }, { bad: [], badCount: 0 }, 'a restored checkpoint differs (op: the op after it)');
+        assert.ok(seek.endSame && !seek.endMismatches, 'restored at the start, it plays to the same end');
+        assert.ok(seek.parts > 0 && seek.badPartial === 0, `strokes drawn a sample time at a time differ after ${seek.badPartial} ops`);
         const sb = strokeBytes(file);
         const ns = sampleCount(file);
         return (
             `${done.length} groups, ${info.strokes} strokes, ${ns} samples, ${info.ops} ops, ${file.chunks.length} chunks, ` +
             `${bytes.length} B (${(bytes.length / info.strokes).toFixed(1)} B/stroke and ${(bytes.length / ns).toFixed(2)} B/sample all in, ` +
             `${(sb / info.strokes).toFixed(1)} B/stroke and ${(sb / ns).toFixed(2)} B/sample strokes only), replay ${Math.round(replay.ms)} ms, ` +
-            `${Math.round(replay.strokes / (replay.ms / 1000))} strokes/s, ${replay.hashChecks} chunk hashes matched`
+            `${Math.round(replay.strokes / (replay.ms / 1000))} strokes/s, ${replay.hashChecks} chunk hashes matched; ` +
+            `a checkpoint before each of ${seek.ops} ops restores exactly (${seek.restoreMs.toFixed(1)} ms each)`
         );
     });
 
