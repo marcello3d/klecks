@@ -87,6 +87,7 @@ export type TKlrCheckpoint = {
     readonly result: TKlrPlayerResult;
     readonly hasher: KlrHasher;
     readonly penTipsUsed: boolean;
+    readonly tainted: boolean;
     readonly ffdRenderer: FfdRenderer | undefined;
     // the layers' pixels as the canvases hold them (see TKlrLayerCapture)
     readonly layers: readonly TKlrLayerCapture[];
@@ -100,7 +101,9 @@ export type TKlrCheckpoint = {
  * tile is a copy of the canvas's own (drawImage, exact), or a fill the canvas is exactly. A tile
  * whose history tile is the same object as at the last checkpoint is the same copy (nothing
  * drew on it since: every stroke pushes the tiles it touched); after any op but a stroke, a line
- * or an undo/redo every tile is copied again.
+ * or an undo/redo every tile is copied again. Only once a WebGL filter or warp has drawn
+ * (`tainted`): until then the 2D canvas's pixels are always what putImageData of the history's
+ * tiles makes (the test checks it at every op), so nothing is copied ({ tile } alone).
  */
 export type TKlrTileCapture = { readonly tile: object | undefined; readonly bmp?: HTMLCanvasElement };
 export type TKlrLayerCapture = {
@@ -318,6 +321,9 @@ export class KlrPlayer {
 
     // the canvases' tiles at the last checkpoint, by layer id; every tile to be copied again
     private captures = new Map<string, TKlrLayerCapture>();
+    // a WebGL filter or warp has drawn since the canvases were last made from the history's tiles:
+    // only then can a canvas hold pixels putImageData would not make (TKlrLayerCapture)
+    private tainted = false;
     // a stroke has drawn with pen's tips since they were last drawn (PEN_TIPS)
     private penTipsUsed = false;
     private allDirty = true;
@@ -372,7 +378,8 @@ export class KlrPlayer {
             const caps: TKlrTileCapture[] = [];
             for (let i = 0; i < n; i++) {
                 const t = tiles[i];
-                caps.push(same && t && prev!.tiles[i].tile === t ? prev!.tiles[i] : this.captureTile(layer.context, t, i, cols, w, h));
+                // (untainted: the history's tile makes the canvas's exactly, nothing to copy)
+                caps.push(!this.tainted ? { tile: t } : same && t && prev!.tiles[i].tile === t ? prev!.tiles[i] : this.captureTile(layer.context, t, i, cols, w, h));
             }
             const cap: TKlrLayerCapture = { id: layer.id, canvas: layer.canvas, w, h, tiles: caps };
             next.set(layer.id, cap);
@@ -550,6 +557,9 @@ export class KlrPlayer {
         if (!TILE_TRACKED_OPS.has(op.op) && !(op.op === 'canvas' && PIXEL_FREE_METHODS.has(op.method))) {
             this.allDirty = true;
         }
+        if (op.op === 'filter' || op.op === 'ffd') {
+            this.tainted = true;
+        }
         switch (op.op) {
             case 'brush': {
                 this.brushId = op.brush;
@@ -688,6 +698,8 @@ export class KlrPlayer {
         this.klCanvas = klCanvas;
         this.brushes.clear();
         this.penTipsUsed = false;
+        this.tainted = false; // (fresh canvases from the history's tiles)
+        this.allDirty = true;
         this.samples.clear();
         this.clips.clear();
         this.ffdRenderer = undefined;
@@ -726,6 +738,7 @@ export class KlrPlayer {
                 this.brushes.set(id, brush);
             }
             this.penTipsUsed = cp.penTipsUsed;
+            this.tainted = cp.tainted;
             this.brushId = cp.brushId;
             this.brushLayer = cp.brushLayer;
             cp.samples.forEach((v, k) => this.samples.set(k, v));
@@ -767,6 +780,7 @@ export class KlrPlayer {
                 id === 'penBrush' && this.penTipsUsed ? Object.fromEntries(PEN_TIPS.map(([k]) => [k, brush[k]])) : undefined,
             ]),
             penTipsUsed: this.penTipsUsed,
+            tainted: this.tainted,
             brushId: this.brushId,
             brushLayer: this.brushLayer,
             samples: new Map(this.samples),

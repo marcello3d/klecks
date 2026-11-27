@@ -219,6 +219,9 @@ Two things the history does not hold, found by the test below:
   that. A tile whose history tile is the same object as at the last checkpoint keeps the same
   copy (strokes, lines and undo/redo change only tiles they push or put back); after any other
   op every tile is copied again. A restore draws the copies over the canvas the history made.
+  Only once a WebGL filter or warp has drawn (until the canvases are next made from the
+  history's tiles, a restore chunk): before that the 2D canvas's pixels are always what
+  putImageData of the history's tiles makes, and nothing is copied.
 - Pen's image tips (alphaCanvas128/64/32) draw a little differently in Chrome once a stroke has
   drawn from them than the first time after they were redrawn, though they read back the same.
   So the player gives the pen new tip canvases before a brush op redraws them (never redrawing
