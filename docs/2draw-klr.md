@@ -149,6 +149,13 @@ they ended up in software anyway; the measured cost while drawing is nil (below)
 the PNG composite of a half-opacity layer rounds differently from a GPU composite (the tiles-1
 fixtures' expected.png were made on the GPU, so they are checked without recording).
 
+Display canvases opt out (`displayContext()`, same file): the easel's viewport, the filter
+dialogs' previews (`ProjectViewport`, `KlCanvasPreview`, `FxPreviewRenderer`'s 2D source) stay
+on the GPU. Nothing reads them back or draws them into a layer: the eyedropper reads the
+history's tiles, thumbnails and exports the layers, a filter applies to the layer at its own size.
+They draw at device pixels (`useNativeResolution`, at most 3×; upstream draws at CSS pixels, soft
+on retina); transforms, overlays and the pointer stay in CSS pixels.
+
 ## Drafts: `klecks-tiles-2`
 
 `embed/embed-draft.ts`. tiles-1 (still read, forever) plus, under `'klr'`, `TTail.klr` (v 2): the
@@ -292,3 +299,13 @@ Drawing cost of software canvases (`scripts/perf-klr-canvas.mjs`, Chrome with th
 Metal; 30 fast real-mouse strokes, pen and blend): GPU without recording and software with
 `'klr'` both ran at 16.7 ms p50 frames, p95 at most 16.8 ms, no frame over 20 ms and no long
 task, at 1200×900 and at 3000×3000. Headless Chrome on a Mac; not measured on an iPad.
+
+The viewport on the GPU at device pixels (`scripts/perf-klr-viewport.mjs`, 3000×3000, pan, wheel
+zoom, pen strokes; 1009×800 CSS viewport): every phase at 16.7 ms p50 before and after, at DPR 1,
+2 and 3. Renderer main thread per frame, software 1× before → GPU at device pixels after: pan
+2.2-2.7 → 1.1-1.5 ms, zoom 1.5-5.3 → 0.6-1.2 ms, drawing 2.6-2.9 → 2.4-2.5 ms; the GPU process
+0.3-1.1 → 0.6-2.4 ms. DPR 3 at 3× (3027×2400) cost the same as at 2×, so no lower cap.
+`scripts/test-klr-viewport.mjs`: at DPR 1, 2 and 3, fit and after a pinch that zooms and rotates,
+strokes, the select polygon and the shape preview land under the pointer; Tilt Shift's handles sit
+on what its preview draws, and the filter applied through the dialog gives the same layers at
+every DPR, which the .klr replays to.

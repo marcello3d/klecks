@@ -343,6 +343,8 @@ export class Easel<GToolId extends string> {
                 layers: this.project.layers,
             },
             transform: this.getResetTransform(),
+            // device pixels: sharp on retina screens (2draw; upstream draws at CSS pixels)
+            useNativeResolution: true,
             onBeforeRender: p.onBeforeRender,
             renderAfter: (ctx, renderedTransform) => {
                 const tool = this.getActiveTool();

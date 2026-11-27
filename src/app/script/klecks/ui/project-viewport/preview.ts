@@ -216,7 +216,8 @@ export class Preview {
                 false,
             ),
             project: this.project,
-            useNativeResolution: false,
+            // device pixels (2draw): sharp on retina screens; handles and pointer stay in CSS px
+            useNativeResolution: true,
             background: p.background,
         });
 

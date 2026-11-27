@@ -13,6 +13,23 @@ import {
     isPixelatedZoomEnabled,
     removeIsPixelatedZoomListener,
 } from '../components/pixelated-zoom-toggle';
+import { displayContext } from '../../canvas/layer-context';
+
+/**
+ * Canvas pixels per CSS pixel with useNativeResolution: the device's, at most this (a bound for
+ * odd screens; DPR 3 cost no more than 2 on the GPU, see docs/2draw-klr.md).
+ */
+export const MAX_RES_FACTOR = 3;
+
+function getResFactor(useNativeResolution: boolean): number {
+    return useNativeResolution ? Math.min(devicePixelRatio, MAX_RES_FACTOR) : 1;
+}
+
+// pixelated when each canvas pixel covers a whole number of device pixels
+function getImageRendering(resFactor: number): 'pixelated' | '' {
+    const ratio = devicePixelRatio / resFactor;
+    return Math.round(ratio) === ratio ? 'pixelated' : '';
+}
 
 function fixScale(scale: number, pixels: number): number {
     return Math.round(pixels * scale) / pixels;
@@ -75,6 +92,10 @@ export type TProjectViewportParams = {
  *          canvas may actually have.
  * Translate - translates in CSS pixels
  * Viewport origin is top left (same as canvas)
+ * useNativeResolution - the canvas has device pixels (up to MAX_RES_FACTOR per CSS pixel);
+ *      transforms, renderAfter and the pointer stay in CSS pixels.
+ * The canvas is a display one (GPU where the browser likes, displayContext()): only shown,
+ *      never read back, so softwareCanvases() leaves it alone.
  *
  * Order of transformations (matrix multiplication is reversed): translate, rotate, scale
  */
@@ -108,9 +129,14 @@ export class ProjectViewport {
     private oldDPR = devicePixelRatio;
     private resizeListener = () => {
         if (devicePixelRatio !== this.oldDPR) {
-            this.canvas.style.imageRendering =
-                Math.round(devicePixelRatio) !== devicePixelRatio ? '' : 'pixelated';
             this.oldDPR = devicePixelRatio;
+            if (this.useNativeResolution) {
+                // moved to a screen of another density
+                this.doResize = true;
+                this.render();
+            } else {
+                this.canvas.style.imageRendering = getImageRendering(this.resFactor);
+            }
         }
     };
 
@@ -129,14 +155,16 @@ export class ProjectViewport {
             ...p.transform,
         };
 
-        this.resFactor = this.useNativeResolution ? devicePixelRatio : 1;
-        this.canvas = BB.canvas(this.width * this.resFactor, this.height * this.resFactor);
-        this.ctx = BB.ctx(this.canvas);
+        this.resFactor = getResFactor(this.useNativeResolution);
+        this.canvas = BB.canvas(
+            Math.round(this.width * this.resFactor),
+            Math.round(this.height * this.resFactor),
+        );
+        this.ctx = displayContext(this.canvas);
         css(this.canvas, {
             width: this.doFillParent ? '100%' : this.width,
             height: this.doFillParent ? '100%' : this.height,
-            imageRendering:
-                Math.round(devicePixelRatio) !== devicePixelRatio ? undefined : 'pixelated',
+            imageRendering: getImageRendering(this.resFactor) || undefined,
             display: 'block',
             // achieves accurate mixing with all layer mix modes
             background: 'var(--kl-checkerboard-background)',
@@ -162,14 +190,18 @@ export class ProjectViewport {
 
         if (this.doResize) {
             this.doResize = false;
-            this.resFactor = this.useNativeResolution ? devicePixelRatio : 1;
+            this.resFactor = getResFactor(this.useNativeResolution);
             changeCanvasDimensions(
                 this.canvas,
                 Math.round(this.width * this.resFactor),
                 Math.round(this.height * this.resFactor),
                 // we'll clear later anyway
             );
+            this.canvas.style.imageRendering = getImageRendering(this.resFactor);
         }
+        // canvas pixels per CSS pixel, as rounded
+        const resX = this.width > 0 ? this.canvas.width / this.width : 1;
+        const resY = this.height > 0 ? this.canvas.height / this.height : 1;
 
         const renderedTransform: TViewportTransformXY = optimizeForAnimation
             ? {
@@ -212,6 +244,7 @@ export class ProjectViewport {
             this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
         }
 
+        this.ctx.scale(resX, resY);
         this.ctx.transform(...matrixToTuple(renderedMat));
         {
             this.ctx.save();
@@ -244,8 +277,15 @@ export class ProjectViewport {
                 let renderedImage = renderedImages.get(layer);
                 if (!renderedImage) {
                     if (typeof layer.image === 'function') {
+                        // in canvas pixels, which the size is in
                         const result = layer.image(
-                            this.renderedTransform,
+                            {
+                                ...this.renderedTransform,
+                                x: this.renderedTransform.x * resX,
+                                y: this.renderedTransform.y * resY,
+                                scaleX: this.renderedTransform.scaleX * resX,
+                                scaleY: this.renderedTransform.scaleY * resY,
+                            },
                             this.canvas.width,
                             this.canvas.height,
                         );

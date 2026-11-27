@@ -1,4 +1,5 @@
 import { TFxCanvas, TWrappedTexture } from '../../../fx-canvas/fx-canvas-types';
+import { displayContext } from '../../canvas/layer-context';
 import { TProjectViewportLayerFunc, TViewportTransformXY } from './project-viewport';
 import { BB } from '../../../bb/bb';
 import { changeCanvasDimensions } from '../../../bb/base/change-canvas-dimensions';
@@ -121,7 +122,8 @@ export class FxPreviewRenderer {
         this.original = p.original;
         this.onUpdate = p.onUpdate;
         this.textureSource = BB.canvas(1, 1);
-        this.ctx = BB.ctx(this.textureSource);
+        // only drawn into the preview's viewport: a display canvas, see displayContext()
+        this.ctx = displayContext(this.textureSource);
         this.fxCanvas = throwIfNull(getSharedFx());
         this.texture = this.fxCanvas.texture(this.original);
         this.texture.setSampling('linear', 'nearest');

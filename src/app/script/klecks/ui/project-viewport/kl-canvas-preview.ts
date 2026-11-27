@@ -2,6 +2,8 @@ import { BB } from '../../../bb/bb';
 import { LayerCompositor } from '../../canvas/layer-compositor';
 import { TKlBasicLayer } from '../../kl-types';
 import { css } from '../../../bb/base/base';
+import { displayContext } from '../../canvas/layer-context';
+import { MAX_RES_FACTOR } from './project-viewport';
 
 /**
  * preview of image with layers. can do mix modes and opacity.
@@ -17,12 +19,15 @@ export class KlCanvasPreview {
     constructor(p: { width: number; height: number; layers: TKlBasicLayer[] }) {
         this.layers = p.layers;
 
-        const scale = p.width / p.layers[0].image.width;
-        const width = scale > 1 ? p.layers[0].image.width : p.width;
-        const height = scale > 1 ? p.layers[0].image.height : p.height;
+        // device pixels (2draw), as ProjectViewport's useNativeResolution
+        const res = Math.min(devicePixelRatio || 1, MAX_RES_FACTOR);
+        const scale = (p.width * res) / p.layers[0].image.width;
+        const width = scale > 1 ? p.layers[0].image.width : Math.round(p.width * res);
+        const height = scale > 1 ? p.layers[0].image.height : Math.round(p.height * res);
 
         this.canvas = BB.canvas(width, height);
-        this.ctx = BB.ctx(this.canvas);
+        // only shown: a display canvas, see displayContext()
+        this.ctx = displayContext(this.canvas);
 
         css(this.canvas, {
             width: '100%',
