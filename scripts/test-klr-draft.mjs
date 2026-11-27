@@ -352,7 +352,7 @@ for (const name of browsers) {
                     `draft ${(st.bytes / 1024).toFixed(0)} kB in ${st.pieces} pieces + tail ${(st.tailBytes / 1024).toFixed(1)} kB ` +
                     `(${i.klrPieces} .klr pieces, .klr ${(st.klr.bytes / 1024).toFixed(1)} kB); ` +
                     `${i.checkpoints} checkpoints, last ${i.lastMs.toFixed(1)} ms, max ${i.maxMs.toFixed(1)} ms main thread; ` +
-                    `of which the seal (hashes + coding) last ${st.klr.sealMs.toFixed(1)} ms, max ${st.klr.sealMaxMs.toFixed(1)} ms; ` +
+                    `longest unbroken stretch ${i.sliceMaxMs.toFixed(1)} ms; the seal (coding + any hashes left) last ${st.klr.sealMs.toFixed(1)} ms, max ${st.klr.sealMaxMs.toFixed(1)} ms; ` +
                     `restore ${restored.toFixed(0)} ms; hash tiles read ${st.klr.hashTilesRead}`
                 );
             });

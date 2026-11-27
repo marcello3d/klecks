@@ -525,6 +525,18 @@ export class KlrRecorder implements TKlrHookTarget {
         return true;
     }
 
+    /**
+     * Before a seal, in slices: reads back up to `max` of the layer tiles the seal's hashes
+     * need (those changed since the last), so the seal itself is short. Returns how many are
+     * left (0: the seal reads back nothing). Only while nothing is being drawn.
+     */
+    warmHashes(max: number): number {
+        if (this.stroke || this.depth > 0 || this.api.isDrawing() || this.open.ops.length === 0) {
+            return 0;
+        }
+        return this.hasher.warm(this.api.klCanvas, this.api.klHistory, max);
+    }
+
     getChunks(): TKlrChunks {
         return { head: this.head, sealed: this.sealed.slice() };
     }

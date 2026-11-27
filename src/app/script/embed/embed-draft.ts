@@ -90,6 +90,7 @@ const ENC_RAW = 0;
 const ENC_DEFLATE = 1;
 const QUIET_MS = 500; // the pen rests this long before a save (not between fast strokes)
 const BATCH = 8; // tiles per worker task. Input is checked in between.
+const HASH_BATCH = 8; // .klr hash tiles read back per slice before a checkpoint's seal
 const PIECE_MAX = 1024 * 1024;
 const COMPACT_MIN_BYTES = 4 * 1024 * 1024;
 const COMPACT_PIECES = 4096;
@@ -354,6 +355,8 @@ export type TDraftInfo = {
     // counted), the last and the longest
     lastMs: number;
     maxMs: number;
+    sliceMaxMs: number; // the longest stretch of a checkpoint's main-thread time without a break
+
     savedBytes: number; // pieces, as stored
     tailBytes: number;
     klrPieces: number;
@@ -379,6 +382,7 @@ export class EmbedDraft {
         checkpoints: 0,
         lastMs: 0,
         maxMs: 0,
+        sliceMaxMs: 0,
         savedBytes: 0,
         tailBytes: 0,
         klrPieces: 0,
@@ -432,7 +436,9 @@ export class EmbedDraft {
 
     // awaits p without counting the wait as the save's main-thread time
     private async w<T>(p: Promise<T>): Promise<T> {
-        this.busyMs += performance.now() - this.busyFrom;
+        const slice = performance.now() - this.busyFrom;
+        this.busyMs += slice;
+        this.info.sliceMaxMs = Math.max(this.info.sliceMaxMs, slice);
         try {
             return await p;
         } finally {
@@ -502,6 +508,18 @@ export class EmbedDraft {
     private async save(): Promise<void> {
         this.busyMs = 0;
         this.busyFrom = performance.now();
+        // the recording's seal hashes the changed layer tiles: read them back a few at a time
+        // first, giving way to input (drawing aborts the save; what was read is kept)
+        try {
+            while (this.klr && !this.isUrgent && this.klr.warmHashes(HASH_BATCH) > 0) {
+                await this.w(this.giveWay());
+            }
+        } catch (e) {
+            if (e === ABORTED) {
+                return;
+            }
+            throw e;
+        }
         const seq = this.changeSeq;
         const composed = this.klApp.getKlHistory().getComposed();
         // the recording at the same moment as the picture (sealed: no open chunk in a draft)
@@ -670,7 +688,9 @@ export class EmbedDraft {
             this.savedSeq = seq;
             this.lastCheckpointMs = performance.now();
             this.compactWanted = this.shouldCompact(layers);
-            this.busyMs += performance.now() - this.busyFrom;
+            const slice = performance.now() - this.busyFrom;
+            this.busyMs += slice;
+            this.info.sliceMaxMs = Math.max(this.info.sliceMaxMs, slice);
             this.info.checkpoints++;
             this.info.lastMs = this.busyMs;
             this.info.maxMs = Math.max(this.info.maxMs, this.busyMs);
