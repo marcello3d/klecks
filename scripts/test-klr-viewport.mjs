@@ -4,8 +4,12 @@
 // tool's lasso (drawn by renderAfter) and the shape tool's preview (a layer's compositeObj) must
 // be under the pointer mid-drag. Pixels are read from page screenshots (device pixels).
 //
-//   node scripts/test-klr-viewport.mjs [--build] [--dist <dir>] [--dpr 1,2,3]
-import { chromium } from 'playwright-core';
+// Also, in Chrome and WebKit: no checkerboard (the canvas's CSS background) along the edges of
+// a filter preview or the easel at any sub-pixel position (Safari drew a GPU canvas one device
+// pixel off its CSS box, a dashed line along the preview's bottom).
+//
+//   node scripts/test-klr-viewport.mjs [--build] [--dist <dir>] [--dpr 1,2,3] [--edges-only]
+import { chromium, webkit } from 'playwright-core';
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import http from 'node:http';
@@ -114,7 +118,93 @@ async function pinch(cdp, cx, cy, r0, r1, turnDeg) {
     await sleep(600);
 }
 
-for (const dpr of dprs) {
+
+// The checkerboard made magenta, so any of it showing is easy to find; the preview (Tilt Shift's)
+// and the easel's canvas moved by a fraction of a CSS pixel, so its device-pixel edges fall
+// between pixels; the rows and columns along each edge, read from a page screenshot.
+const MAGENTA = '* { --kl-checkerboard-background: rgb(255, 0, 255) !important; }';
+async function edgeLeaks(page, el) {
+    const r = await el.evaluate((c) => { const b = c.getBoundingClientRect(); return [b.left, b.top, b.right, b.bottom]; });
+    const png = (await page.screenshot()).toString('base64');
+    return page.evaluate(async ({ png, r }) => {
+        const im = new Image();
+        im.src = 'data:image/png;base64,' + png;
+        await im.decode();
+        const c = document.createElement('canvas');
+        c.width = im.width; c.height = im.height;
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(im, 0, 0);
+        const dpr = im.width / innerWidth;
+        const L = Math.max(0, Math.floor(r[0] * dpr)), T = Math.max(0, Math.floor(r[1] * dpr));
+        const R = Math.min(im.width, Math.ceil(r[2] * dpr)), B = Math.min(im.height, Math.ceil(r[3] * dpr));
+        const count = (x, y, w, h) => {
+            const d = ctx.getImageData(x, y, w, h).data;
+            let n = 0;
+            for (let k = 0; k < d.length; k += 4) if (d[k] - d[k + 1] > 12 && d[k + 2] - d[k + 1] > 12) n++;
+            return n;
+        };
+        const leaks = {
+            top: count(L, T, R - L, 2),
+            bottom: count(L, B - 2, R - L, 2),
+            left: count(L, T, 2, B - T),
+            right: count(R - 2, T, 2, B - T),
+        };
+        return Object.entries(leaks).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n} px`).join(', ');
+    }, { png, r });
+}
+
+async function edgeChecks(type, name) {
+    const b = type === chromium ? browser : await type.launch();
+    for (const dpr of dprs) {
+        const ctx = await b.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: dpr });
+        const page = await ctx.newPage();
+        await page.goto(base + '?w=1200&h=900');
+        await page.evaluate(() => window.ready);
+        await sleep(500);
+        await page.addStyleTag({ content: MAGENTA });
+        const easel = await page.evaluateHandle(() => [...document.querySelectorAll('canvas')].sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight)[0]);
+        const bad = [];
+        for (const off of [0, 0.25, 0.5, 0.75]) {
+            await easel.evaluate((c, off) => { c.style.marginTop = c.style.marginLeft = `${off}px`; }, off);
+            await sleep(300);
+            const leak = await edgeLeaks(page, easel);
+            if (leak) bad.push(`+${off}: ${leak}`);
+        }
+        await easel.evaluate((c) => { c.style.marginTop = c.style.marginLeft = ''; });
+        check(!bad.length, `${name} dpr ${dpr}: no checkerboard along the easel's edges${bad.length ? ` (${bad.join('; ')})` : ''}`);
+
+        await page.click('[title="Edit"]');
+        await page.locator('button', { hasText: /^\s*Tilt Shift\s*$/ }).first().click({ timeout: 10000 });
+        await sleep(800);
+        const preview = await page.evaluateHandle(() => {
+            const h = [...document.querySelectorAll('div')].find((el) => el.style.position === 'absolute' && el.style.cursor === 'move' && el.style.borderRadius);
+            return h.parentElement.querySelector('canvas');
+        });
+        bad.length = 0;
+        for (const off of [0, 0.25, 0.5, 0.75]) {
+            await page.evaluate((off) => { const box = document.querySelector('.kl-popup-box'); box.style.top = box.style.left = `${off}px`; }, off);
+            await sleep(300);
+            const leak = await edgeLeaks(page, preview);
+            if (leak) bad.push(`+${off}: ${leak}`);
+            // --crops <dir>: the preview's bottom edge with the real checkerboard, for a look
+            if (opt('--crops') && off === 0.25) {
+                const r = await preview.evaluate((c) => { const b = c.getBoundingClientRect(); return [b.left, b.bottom]; });
+                await page.evaluate(() => document.querySelectorAll('style').forEach((st) => st.textContent.includes('255, 0, 255') && (st.disabled = true)));
+                await sleep(200);
+                await page.screenshot({ path: join(opt('--crops'), `${name}-dpr${dpr}-preview-bottom.png`), clip: { x: r[0] - 6, y: r[1] - 10, width: 120, height: 20 } });
+                await page.evaluate(() => document.querySelectorAll('style').forEach((st) => (st.disabled = false)));
+            }
+        }
+        check(!bad.length, `${name} dpr ${dpr}: no checkerboard along the tilt shift preview's edges${bad.length ? ` (${bad.join('; ')})` : ''}`);
+        await ctx.close();
+    }
+    if (b !== browser) await b.close();
+}
+
+await edgeChecks(chromium, 'chrome');
+await edgeChecks(webkit, 'webkit');
+
+for (const dpr of args.includes('--edges-only') ? [] : dprs) {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: dpr, hasTouch: true });
     const page = await ctx.newPage();
     const cdp = await ctx.newCDPSession(page);
@@ -276,7 +366,7 @@ for (const dpr of dprs) {
     }
     await fctx.close();
 }
-check(new Set(filterHashes.map((h) => h.live)).size === 1, `tilt shift applied through the dialog: the same layers at dpr ${filterHashes.map((h) => h.dpr).join(', ')}`);
+if (filterHashes.length) check(new Set(filterHashes.map((h) => h.live)).size === 1, `tilt shift applied through the dialog: the same layers at dpr ${filterHashes.map((h) => h.dpr).join(', ')}`);
 await browser.close();
 server.close();
 console.log(failures ? `${failures} check(s) failed` : 'all checks passed');

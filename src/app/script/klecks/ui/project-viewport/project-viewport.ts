@@ -114,6 +114,7 @@ export class ProjectViewport {
     private resFactor: number;
     private background: TProjectViewportParams['background'];
     private doResize: boolean = true;
+    private edgeShadow = '';
     private readonly doFillParent: boolean;
     private readonly onBeforeRender: TProjectViewportParams['onBeforeRender'];
     private readonly renderAfter:
@@ -236,12 +237,21 @@ export class ProjectViewport {
         }
 
         // draw background
+        let edgeShadow = '';
         if (this.background === 'checker') {
             this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
         } else {
             this.ctx.fillStyle =
                 this.background ?? (isDark ? 'rgb(33, 33, 33)' : 'rgb(158,158,158)');
             this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+            // 2draw: Safari draws a GPU canvas at a fractional device-pixel position one device
+            // pixel off its CSS box, which left one row or column of the box's checkerboard
+            // background showing along an edge. Cover a device pixel of it with this color.
+            edgeShadow = `inset 0 0 0 ${1 / devicePixelRatio}px ${this.ctx.fillStyle}`;
+        }
+        if (this.edgeShadow !== edgeShadow) {
+            this.edgeShadow = edgeShadow;
+            this.canvas.style.boxShadow = edgeShadow;
         }
 
         this.ctx.scale(resX, resY);
