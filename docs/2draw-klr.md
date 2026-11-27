@@ -197,29 +197,49 @@ Sealing hashes the layers' changed tiles and codes the chunk.
 
 ## Measured (2026-11-26, `node scripts/test-klr.mjs`, 1200×900)
 
-127 strokes over all seven brushes plus every op type, 10 chunks: about 25.5 kB, 201 B per
-stroke all in, 178 B per stroke for the stroke ops alone (strokes of 8 to 32 points, about 6 to
-7 B per point with transfers and settings). Fresh-page replay with the headless player: every
-layer and every chunk hash equal, in Chrome and in WebKit (each its own recording), 140 strokes/s
+The same scripted session (127 strokes, 2,476 samples, over all seven brushes plus every op type,
+10 chunks), before and after v0:
+
+| | interim coding (c5a1f06) | v0, Chrome | v0, WebKit |
+|---|---:|---:|---:|
+| the .klr | 25,549 B | 11,151 B | 11,340 B |
+| per stroke, all in | 201 B | 88 B | 89 B |
+| per sample, all in | 10.3 B | 4.5 B | 4.6 B |
+| per stroke, stroke ops only (with their BRUSH and LAYER ops) | 178 B | 72 B | 73 B |
+| per sample, the same | 9.1 B | 3.7 B | 3.7 B |
+
+The test's strokes are short (8 to 32 points), jittered and spread over 10 chunks that each
+start the coder's statistics afresh, with a brush change every few strokes, so they cost more
+than Pocket's corpus (0.97 B a sample, PEN-CODER.md section 1); a real session's long strokes
+should land near that. Fresh-page replay with the headless player: every layer and every chunk's
+end hashes equal, in Chrome and in WebKit (each its own recording), 140 to 180 strokes/s
 including the filters; the catch-all never fired.
 
-## Measured, drafts (2026-11-27, `node scripts/test-klr-all.mjs`, Mac M3)
+## Measured, drafts (2026-11-26, `node scripts/test-klr-draft.mjs --measure`, Mac M3)
 
 300 scripted strokes over all brushes, a rest every 25, then flush and reload:
 
 | | 1200×900 Chrome | 1200×900 WebKit | 3000×3000 Chrome | 3000×3000 WebKit |
 |---|---|---|---|---|
-| draft (pieces + tail) | 2.8 MB + 68 kB | 2.7 MB + 69 kB | 11.5 MB + 77 kB | 11.5 MB + 79 kB |
-| .klr | 50 kB | 50 kB | 52 kB | 53 kB |
+| draft (pieces + tail) | 2.8 MB + 1.5 kB | 2.7 MB + 1.5 kB | 11.5 MB + 7.7 kB | 11.5 MB + 7.7 kB |
+| .klr | 21 kB | 22 kB | 24 kB | 25 kB |
 | checkpoints | 6 | 6 | 6 | 6 |
-| main thread per checkpoint, last / max | 2.7 / 4.3 ms | 5.0 / 6.0 ms | 8.1 / 13.2 ms | 12.0 / 14.0 ms |
-| restore | 15 ms | 26 ms | 73 ms | 104 ms |
+| main thread per checkpoint, last / max | 16 / 20 ms | 9 / 15 ms | 72 / 78 ms | 53 / 59 ms |
+| longest unbroken stretch of it | 6.8 ms | 5.0 ms | 6.5 ms | 5.0 ms |
+| the seal in it (coding, hashes left) | 3.2 / 4.4 ms | 1.0 / 3.0 ms | 2.7 / 3.7 ms | 1.0 / 4.0 ms |
+| restore | 12 ms | 21 ms | 59 ms | 89 ms |
 
-(Deflating runs in a worker and the store's own write is not counted.) Reloads right after a
-checkpoint and between two restore the checkpoint's picture exactly; the final .klr, two RESTOREs
-included, replays in a fresh page to the final live hashes, in both browsers.
+(Deflating runs in a worker and the store's own write is not counted.) Against the interim
+coding (2.7 to 14 ms a checkpoint, a 50 kB .klr, 68 to 79 kB of tail) the tail shrank to the
+HEAD and the layer list, and the .klr to less than half; a checkpoint now costs more main-thread
+time because it seals, and a seal hashes the layer tiles changed since the last one (972 tiles
+in all at 3000×3000). Those are read back a few at a time before the seal, giving way to input
+like the tile deflating, so no stretch of it is longer than about 7 ms; the seal's own coding
+takes 1 to 4 ms. Reloads right after a checkpoint and between two restore the checkpoint's
+picture exactly; the final .klr, two restore chunks included, replays in a fresh page to the
+final live hashes, in both browsers.
 
 Drawing cost of software canvases (`scripts/perf-klr-canvas.mjs`, Chrome with the GPU on, ANGLE
 Metal; 30 fast real-mouse strokes, pen and blend): GPU without recording and software with
-`'klr'` both ran at 16.7 ms p50 and p95 frames, max 16.8 ms, no frame over 20 ms and no long
+`'klr'` both ran at 16.7 ms p50 frames, p95 at most 16.8 ms, no frame over 20 ms and no long
 task, at 1200×900 and at 3000×3000. Headless Chrome on a Mac; not measured on an iPad.
